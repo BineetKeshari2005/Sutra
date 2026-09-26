@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Agent Trajectory Timeline</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header id="topbar">
+    <div id="title-row">
+      <h1>Agent Trajectory Timeline</h1>
+      <div id="run-status">loading&hellip;</div>
+    </div>
+    <ol id="phase-rail"></ol>
+  </header>
+
+  <main>
+    <section id="timeline-col">
+      <div id="scrub-wrap">
+        <input type="range" id="scrub" min="0" max="0" value="0" step="1" />
+        <div id="scrub-label">event 0 / 0</div>
+      </div>
+      <div id="event-list"></div>
+    </section>
+
+    <aside id="sidebar">
+      <h2>Run stats</h2>
+      <div class="stat-block">
+        <div class="stat-label">Tokens used so far</div>
+        <div class="stat-value" id="stat-tokens">0</div>
+      </div>
+      <div class="stat-block">
+        <div class="stat-label">Tool calls so far</div>
+        <div class="stat-value" id="stat-tools">0</div>
+      </div>
+      <div class="stat-block">
+        <div class="stat-label">Verification gates</div>
+        <ul id="gate-list"></ul>
+      </div>
+    </aside>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
