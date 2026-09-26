@@ -5,7 +5,7 @@ minimal-descendant of mini-SWE-agent's phase-loop architecture, with three
 differentiators layered on top (scrubbable trajectory timeline, complexity-aware
 budget routing, repo-level institutional memory).
 
-## Status: Phase 0 + Phase 1 + Phase 2 complete
+## Status: Phase 0 + Phase 1 + Phase 2 + Phase 3 complete
 
 The orchestrator, five core tools, model adapter, sandbox, and verifier gates
 are wired end-to-end and have solved a real bug (more-itertools' `one()`/`only()`
@@ -29,7 +29,7 @@ retries_used=1
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-python demo/run_demo.py
+python demo/run_demo.py --issue 1
 ```
 
 By default this runs against a scripted `MockAdapter` (deterministic replay --
@@ -85,6 +85,35 @@ whichever run is loaded, reading `demo/fixtures/more-itertools-trajectory.jsonl`
 and `demo/fixtures/more-itertools-naive-baseline.jsonl` with zero live
 dependency.
 
+## Repo-level institutional memory (Phase 3)
+
+Every run reads `harness/memory/repo_memory.py`'s per-repo JSON file (keyed by
+the repo's root commit hash, stable across every ephemeral sandbox clone) at
+the start of Localize, and writes back to it at Finalize regardless of
+pass/fail -- a failed attempt's landmine is often the single most valuable
+thing to remember.
+
+```bash
+python demo/run_demo.py --issue 1 --reset-memory  # fresh, empty memory bank
+python demo/run_demo.py --issue 2                  # same repo, memory populated by issue #1
+```
+
+Issue #1 (the `one()`/`only()` bug above) and issue #2 (`constrained_batches()`
+accepting a nonpositive `max_count` -- another real upstream bug, fix `d032cab`)
+are both cherry-picked onto the *same* shared base commit, so
+`more_itertools/more.py` is byte-identical going into either run. That's what
+makes the payoff real rather than staged: issue #1's Finalize step builds a
+full top-level symbol index for the whole file (not just the function it
+touched) and caches it fingerprinted to that exact file content; issue #2's
+Localize step hits that cache (content unchanged) and skips search entirely.
+
+Measured, not assumed -- issue #2 needs **zero** localize tool calls (vs. 1 on
+issue #1) and **42% fewer tokens overall** (8,046 vs. 13,843), while landing
+the identical real upstream patch. The timeline UI's sidebar shows this as a
+side-by-side chart plus the exact notes/cache issue #2 started with, and the
+moment they were read and acted on is highlighted in the timeline itself,
+the same treatment Phase 1 gives the self-correction sequence.
+
 Run the harness's own test suite:
 
 ```bash
@@ -110,10 +139,12 @@ harness/
     test_runner.py                 # run_tests -> structured, truncated pytest output
     git_ops.py                       # git_diff / git_checkpoint / git_reset
     bash.py                            # sandboxed escape-hatch shell (rlimits + timeout)
-  context_manager/                     # per-phase context ceilings + rolling summarization (Phase 2)
+  context_manager/                     # per-phase context ceilings + rolling summarization
   memory/
     trajectory_store.py                  # JSONL event log (Phase 1 timeline UI reads this)
-    repo_memory.py                         # per-repo institutional memory (Phase 3)
+    repo_memory.py                         # per-repo JSON store: conventions/landmines/
+                                             # fix_patterns + symbol index cache (Phase 3)
+    memory_writer.py                         # LLM call at Finalize: trajectory -> memory entries
   verifier/
     gates.py                                 # patch-applies -> builds -> target test -> regression subset
   sandbox/
@@ -122,11 +153,10 @@ harness/
   eval/
     run_swebench.py                                # SWE-bench-style scoring harness
 demo/
-  run_demo.py         # driver: prepares sandbox, runs one issue end-to-end;
-                       # --naive-baseline for the Phase 2 control run
+  run_demo.py         # driver: --issue {1,2}, --naive-baseline, --reset-memory
   server.py            # FastAPI: serves fixture/live trajectory JSON + the UI
   fixtures/             # locked known-good trajectory JSONL(s) for offline demos
-  ui/                    # scrubbable timeline + cost dashboard (Phase 1/2)
+  ui/                    # scrubbable timeline + cost dashboard + memory comparison
 tests/                     # harness's own pytest suite
 ```
 
@@ -136,5 +166,8 @@ base commit at submission time is the only source of truth for the patch.
 
 ## Next
 
-- Phase 3: `repo_memory.py` -- solve two issues in the same repo back-to-back
-  and show the second run getting faster/cheaper from what the first wrote back.
+- Add-ons (time permitting): calibrated abstention (submit best checkpoint +
+  a confidence report instead of a falsely-confident patch when verification
+  doesn't fully pass) and blind adversarial review (a second model call sees
+  only the issue text + final diff, no reasoning trace, and flags anything
+  that looks like it's gaming the tests).

@@ -1,15 +1,22 @@
-"""Phase 0 end-to-end demo driver.
+"""Demo driver for the more-itertools repo: two real issues, sharing one
+sandboxed clone family and one repo-memory bank, so Phase 3's institutional
+memory can be demonstrated honestly.
 
-Solves a real GitHub issue-equivalent bug in more-itertools (the one()/only()
-`too_long or ValueError(...)` bug, fixed for real in upstream commit def2dab)
-on a fresh sandboxed clone, verified by the repo's own pytest suite.
+Issue #1: one()/only() drop a falsy custom too_long/too_short exception
+           (real upstream fix: def2dab).
+Issue #2: constrained_batches() doesn't validate a nonpositive max_count
+           (real upstream fix: d032cab, test added in 87d1257).
 
-No live model calls are required to run this (MockAdapter replays a scripted
-trajectory), but the orchestrator, tools, sandbox, budget tracker, verifier
-gates and trajectory log are all exercised for real -- nothing here is faked
-except "what the LLM would have said". Swap `build_adapter()` to return a
-LiteLLMAdapter once GROQ_API_KEY (or another provider's key) is set, and the
-exact same run() call drives a live agent instead.
+Both are cherry-picked (test-commit only) onto the SAME shared base commit
+(19ddb972..., an ancestor of both real fixes) so more_itertools/more.py is
+byte-identical going into either run -- which is what makes the repo-memory
+symbol-index-cache fingerprint check in Part C a genuine hit on issue #2
+rather than a coincidence.
+
+No live model calls are required (MockAdapter replays a scripted trajectory
+per issue), but the orchestrator, tools, sandbox, budget tracker, verifier
+gates, and repo memory are all exercised for real. Set GROQ_API_KEY to run
+live instead -- no other code changes needed.
 """
 from __future__ import annotations
 
@@ -21,16 +28,23 @@ import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from harness.memory.repo_memory import STORE_DIR, repo_id_for
 from harness.memory.trajectory_store import TrajectoryStore
 from harness.model_adapter.mock_adapter import MockAdapter
 from harness.orchestrator.state_machine import Orchestrator, RunConfig
 from harness.sandbox.local_sandbox import LocalSandbox
 
 REPO_LOCAL_SOURCE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scratch_repos", "more-itertools")
-BASE_COMMIT = "9ed3dbb0ae527230cd156d91d0af305478558fba"
-FIX_COMMIT = "def2dabea858b6ecb84ee0c52e6e07929f2c409c"
 
-ISSUE_TEXT = """\
+# Ancestor of BOTH real fixes below, so more_itertools/more.py is byte-identical
+# going into either issue's sandbox -- required for the symbol-index cache's
+# content fingerprint to genuinely match across issue #1 and issue #2.
+SHARED_BASE_COMMIT = "19ddb972845ab0e5b9b7449d3fd5930781407441"
+
+ISSUE1_FIX_COMMIT = "def2dabea858b6ecb84ee0c52e6e07929f2c409c"  # one()/only(), test+fix combined
+ISSUE2_TEST_COMMIT = "87d12578c3e558c57fbfbe663be63259c1fce56f"  # constrained_batches, test-only
+
+ISSUE1_TEXT = """\
 one()/only() silently swallow a falsy custom exception
 
 `one(iterable, too_long=exc)` (and the equivalent `too_short`, and `only`'s
@@ -54,27 +68,55 @@ regardless of its truthiness, and the default message is only constructed
 when no custom exception was supplied.
 """
 
+ISSUE2_TEXT = """\
+constrained_batches() accepts a nonpositive max_count without complaint
 
-def prepare_sandbox() -> tuple[str, str]:
-    """Clone the repo, check out the pre-fix commit, cherry-pick ONLY the
-    regression-test half of the real fix commit (so the sandbox starts with
-    failing tests and unfixed source -- exactly what the agent must resolve),
-    and return (repo_path, new_base_commit)."""
+`constrained_batches(iterable, max_size, max_count=...)` validates that
+*max_size* is positive:
+
+    if max_size <= 0:
+        raise ValueError('maximum size must be greater than zero')
+
+but performs no equivalent check on *max_count*. Passing `max_count=0` or a
+negative value silently produces batches with a bogus `batch_count == max_count`
+comparison (0 == 0 is always true, so every batch is flushed after a single
+item) instead of raising a clear error the way max_size already does.
+
+Expected: max_count, like max_size, should raise ValueError('maximum count
+must be greater than zero') for any max_count <= 0, right after the existing
+max_size check.
+"""
+
+
+def prepare_sandbox(test_commit: str, commit_message: str) -> tuple[str, str]:
+    """Clone the repo, check out SHARED_BASE_COMMIT, cherry-pick ONLY the
+    regression-test half of a real fix commit (so the sandbox starts with
+    failing tests and unfixed source), and return (repo_path, new_base_commit)."""
     sandbox = LocalSandbox(work_root=None)
-    handle = sandbox.create(REPO_LOCAL_SOURCE, BASE_COMMIT, run_id=uuid.uuid4().hex[:8])
+    handle = sandbox.create(REPO_LOCAL_SOURCE, SHARED_BASE_COMMIT, run_id=uuid.uuid4().hex[:8])
     repo_path = handle.repo_path
 
-    subprocess.run(["git", "cherry-pick", "-n", FIX_COMMIT], cwd=repo_path, check=True)
-    # cherry-pick -n staged the fix in the index too, so `checkout -- <path>` (which
-    # restores from the index) would be a no-op; restore from BASE_COMMIT explicitly.
-    subprocess.run(["git", "checkout", BASE_COMMIT, "--", "more_itertools/more.py", "docs/versions.rst"], cwd=repo_path, check=True)
-    subprocess.run(["git", "commit", "-m", "test: add regression tests for one()/only() falsy-exception bug"], cwd=repo_path, check=True)
-    new_base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_path, capture_output=True, text=True, check=True).stdout.strip()
+    subprocess.run(["git", "cherry-pick", "-n", test_commit], cwd=repo_path, check=True)
+    # cherry-pick -n staged the change in the index too, so `checkout -- <path>`
+    # (which restores from the index) would be a no-op there; explicitly restore
+    # any non-test files it touched from SHARED_BASE_COMMIT.
+    changed = subprocess.run(
+        ["git", "diff", "--name-only", "HEAD"], cwd=repo_path, capture_output=True, text=True, check=True
+    ).stdout.split()
+    non_test = [f for f in changed if not f.startswith("tests/")]
+    if non_test:
+        subprocess.run(["git", "checkout", SHARED_BASE_COMMIT, "--", *non_test], cwd=repo_path, check=True)
+    subprocess.run(["git", "commit", "-m", commit_message], cwd=repo_path, check=True)
+    new_base = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo_path, capture_output=True, text=True, check=True
+    ).stdout.strip()
 
     return repo_path, new_base
 
 
-_SHARED_BLOCK = (
+# ---- issue #1: one()/only() -------------------------------------------
+
+_ONE_ONLY_SHARED_BLOCK = (
     "    iterator = iter(iterable)\n"
     "    for first in iterator:\n"
     "        for second in iterator:\n"
@@ -85,27 +127,11 @@ _SHARED_BLOCK = (
     "            raise too_long or ValueError(msg)\n"
     "        return first\n"
 )
-_TRAILER_BY_FUNC = {
+_ONE_ONLY_TRAILER = {
     "one": "    raise too_short or ValueError('too few items in iterable (expected 1)')\n",
     "only": "    return default\n",
 }
-
-
-def _extract_block(repo_path: str, func_name: str) -> str:
-    """Pull the exact unfixed block out of the live sandbox file, anchored on the
-    specific `def one(`/`def only(` occurrence, so the scripted edit's old_str is
-    guaranteed to match byte-for-byte AND be unique in the file."""
-    with open(os.path.join(repo_path, "more_itertools/more.py")) as f:
-        content = f.read()
-    def_idx = content.index(f"\ndef {func_name}(")
-    block_idx = content.index(_SHARED_BLOCK, def_idx)
-    trailer = _TRAILER_BY_FUNC[func_name]
-    trailer_idx = content.index(trailer, block_idx)
-    end = trailer_idx + len(trailer)
-    return content[block_idx:end]
-
-
-_FIXED_CORE = (
+_ONE_ONLY_FIXED_CORE = (
     "    iterator = iter(iterable)\n"
     "    for first in iterator:\n"
     "        for second in iterator:\n"
@@ -119,23 +145,35 @@ _FIXED_CORE = (
 )
 
 
-def _fixed_blocks(one_old: str, only_old: str) -> tuple[str, str]:
+def _extract_one_only_block(repo_path: str, func_name: str) -> str:
+    with open(os.path.join(repo_path, "more_itertools/more.py")) as f:
+        content = f.read()
+    def_idx = content.index(f"\ndef {func_name}(")
+    block_idx = content.index(_ONE_ONLY_SHARED_BLOCK, def_idx)
+    trailer = _ONE_ONLY_TRAILER[func_name]
+    trailer_idx = content.index(trailer, block_idx)
+    return content[block_idx : trailer_idx + len(trailer)]
+
+
+def _one_only_fixed_blocks(one_old: str, only_old: str) -> tuple[str, str]:
     one_new = (
-        _FIXED_CORE
+        _ONE_ONLY_FIXED_CORE
         + "    if too_short is not None:\n"
         "        raise too_short\n"
         "    raise ValueError('too few items in iterable (expected 1)')\n"
     )
-    only_new = _FIXED_CORE + _TRAILER_BY_FUNC["only"]
+    only_new = _ONE_ONLY_FIXED_CORE + _ONE_ONLY_TRAILER["only"]
     return one_new, only_new
 
 
-def build_mock_adapter_with_blocks(one_old: str, only_old: str) -> MockAdapter:
-    """Sutra's scripted trajectory: a cheap triage call sizes the budget, then a
-    narrow, minimal-context localize/act pass -- narrow enough that it misses
-    only()'s identical bug on the first attempt, catches it for real via the
-    regression gate, and fixes it in a second, budget-aware pass."""
-    one_new, only_new = _fixed_blocks(one_old, only_old)
+def build_issue1_mock_adapter(repo_path: str) -> MockAdapter:
+    """A cheap triage call sizes the budget, then a narrow, minimal-context
+    localize/act pass -- narrow enough that it misses only()'s identical bug
+    on the first attempt, catches it for real via the regression gate, and
+    fixes it in a second, budget-aware pass. Ends with a memory-write call."""
+    one_old = _extract_one_only_block(repo_path, "one")
+    only_old = _extract_one_only_block(repo_path, "only")
+    one_new, only_new = _one_only_fixed_blocks(one_old, only_old)
 
     script = [
         {"content": (
@@ -170,18 +208,28 @@ def build_mock_adapter_with_blocks(one_old: str, only_old: str) -> MockAdapter:
         {"content": "Applying the fix to only().", "tool": {"name": "edit_file", "arguments": {"path": "more_itertools/more.py", "old_str": only_old, "new_str": only_new}}},
         {"content": "Running the only() regression tests.", "tool": {"name": "run_tests", "arguments": {"test_path": "tests/test_more.py::OnlyTests"}}},
         {"content": "only()'s tests pass too. Both functions are fixed."},
+        {"content": (
+            '{"conventions": [{"note": "more_itertools/more.py is a single ~5600-line file holding every '
+            "public function; tests live in tests/test_more.py in one TestCase per function, named "
+            'FooTests for a function foo()."}], '
+            '"landmines": [{"path": "more_itertools/more.py", "symbol": "one", "note": "one() and only() '
+            "share the exact same `raise too_long or ValueError(msg)` block -- fixing one without the "
+            'other passes locally but fails the regression gate on the other."}], '
+            '"fix_patterns": [{"pattern": "falsy-value-swallowed-by-or-check", "example_diff_summary": '
+            '"`raise X or default` silently drops a falsy X; replace with an explicit `if X is not None: '
+            'raise X` / `else` split."}]}'
+        )},
     ]
     return MockAdapter(script)
 
 
-def build_naive_mock_adapter_with_blocks(one_old: str, only_old: str) -> MockAdapter:
-    """Control condition: no triage call (skipped by naive_baseline mode itself),
-    no windowed/scoped reading, no incremental verification -- it dumps large
-    unscoped chunks of the file into context (which then sit in every later
-    turn's prompt, uncompressed) and reruns the *entire* suite on every check.
-    It reaches the same correct patch, just by doing substantially more,
-    heavier-context work along the way."""
-    one_new, only_new = _fixed_blocks(one_old, only_old)
+def build_naive_mock_adapter(repo_path: str) -> MockAdapter:
+    """Phase 2 control condition: no triage call, no windowed/scoped reading,
+    no incremental verification -- reaches the same correct patch, at far
+    higher token cost."""
+    one_old = _extract_one_only_block(repo_path, "one")
+    only_old = _extract_one_only_block(repo_path, "only")
+    one_new, only_new = _one_only_fixed_blocks(one_old, only_old)
 
     script = [
         {"content": (
@@ -202,24 +250,120 @@ def build_naive_mock_adapter_with_blocks(one_old: str, only_old: str) -> MockAda
         {"content": "Applying the fix to only().", "tool": {"name": "edit_file", "arguments": {"path": "more_itertools/more.py", "old_str": only_old, "new_str": only_new}}},
         {"content": "Running the full test suite to be thorough.", "tool": {"name": "run_tests", "arguments": {}}},
         {"content": "All tests pass across the full suite. Both functions are fixed."},
+        {"content": "{}"},  # naive baseline: no memory write worth logging
     ]
     return MockAdapter(script)
 
 
+# ---- issue #2: constrained_batches -------------------------------------
+
+_CB_OLD_ANCHOR = (
+    "    if max_size <= 0:\n"
+    "        raise ValueError('maximum size must be greater than zero')\n"
+    "\n"
+    "    batch = []\n"
+)
+_CB_NEW_ANCHOR = (
+    "    if max_size <= 0:\n"
+    "        raise ValueError('maximum size must be greater than zero')\n"
+    "    if max_count is not None and max_count <= 0:\n"
+    "        raise ValueError('maximum count must be greater than zero')\n"
+    "\n"
+    "    batch = []\n"
+)
+
+
+def build_issue2_mock_adapter() -> MockAdapter:
+    """Sutra's second run against the SAME repo: repo memory (populated by
+    issue #1) supplies a fresh symbol-index cache for more_itertools/more.py,
+    so Localize needs zero search tool calls -- it jumps straight to the
+    cached line number. This is the concrete, measurable payoff Part D asks
+    for, not a narrative embellishment."""
+    script = [
+        {"content": (
+            '{"tier": "trivial", "justification": "A single missing validation check, '
+            'mirroring an existing sibling check one line above it."}'
+        )},
+        {"content": (
+            "constrained_batches() validates max_size but not max_count; a nonpositive "
+            "max_count should raise ValueError the same way max_size already does."
+        )},
+        {"content": (
+            "The repo-memory symbol index cache already has constrained_batches's line number in "
+            "more_itertools/more.py from the one()/only() run (the cache was built from the whole "
+            "file, not just the symbols touched then, and the file hasn't changed since). No fresh "
+            "search needed -- jumping straight to that line."
+        )},
+        {"content": "Plan: add `if max_count is not None and max_count <= 0: raise ValueError(...)` right after the existing max_size check."},
+        {"content": "Applying the fix.", "tool": {"name": "edit_file", "arguments": {"path": "more_itertools/more.py", "old_str": _CB_OLD_ANCHOR, "new_str": _CB_NEW_ANCHOR}}},
+        {"content": "Running the constrained_batches regression tests.", "tool": {"name": "run_tests", "arguments": {"test_path": "tests/test_more.py::ConstrainedBatchesTests"}}},
+        {"content": "Tests pass. The fix is complete."},
+        {"content": (
+            '{"conventions": [], '
+            '"landmines": [], '
+            '"fix_patterns": [{"pattern": "missing-sibling-validation", "example_diff_summary": '
+            '"a validated parameter (max_size) has an unvalidated sibling (max_count) that should '
+            'follow the same raise-ValueError pattern."}]}'
+        )},
+    ]
+    return MockAdapter(script)
+
+
+ISSUES = {
+    "1": {
+        "test_commit": ISSUE1_FIX_COMMIT,
+        "commit_message": "test: add regression tests for one()/only() falsy-exception bug",
+        "issue_text": ISSUE1_TEXT,
+        "issue_id": "one-only-falsy-exception",
+        "target_test": "tests/test_more.py::OneTests::test_falsy_custom_exception",
+        "regression_test_paths": ["tests/test_more.py::OneTests", "tests/test_more.py::OnlyTests"],
+        "mock_builder": lambda repo_path: build_issue1_mock_adapter(repo_path),
+        "naive_mock_builder": lambda repo_path: build_naive_mock_adapter(repo_path),
+    },
+    "2": {
+        "test_commit": ISSUE2_TEST_COMMIT,
+        "commit_message": "test: add regression tests for constrained_batches nonpositive max_count",
+        "issue_text": ISSUE2_TEXT,
+        "issue_id": "constrained-batches-nonpositive-max-count",
+        "target_test": "tests/test_more.py::ConstrainedBatchesTests::test_nonpositive_max_count",
+        "regression_test_paths": ["tests/test_more.py::ConstrainedBatchesTests"],
+        "mock_builder": lambda repo_path: build_issue2_mock_adapter(),
+        "naive_mock_builder": None,
+    },
+}
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Phase 0-2 demo driver")
+    parser = argparse.ArgumentParser(description="Phase 0-3 demo driver")
+    parser.add_argument("--issue", choices=["1", "2"], default="1", help="which real issue to solve (default: 1)")
     parser.add_argument(
         "--naive-baseline",
         action="store_true",
-        help="control condition: skip triage, always use the largest ('complex') budget profile, "
-        "never force an early phase transition -- everything else (same issue, same sandbox, same "
-        "verifier) is identical to the normal run.",
+        help="control condition (issue 1 only): skip triage, always use the largest budget profile, "
+        "never force an early phase transition.",
+    )
+    parser.add_argument(
+        "--reset-memory",
+        action="store_true",
+        help="wipe this repo's memory bank before running -- use before issue #1 for a genuinely "
+        "fresh/empty memory bank in the two-issue demo.",
     )
     args = parser.parse_args()
 
-    print("[demo] preparing sandbox (clone + checkout base commit + cherry-pick regression tests)...")
-    repo_path, base_commit = prepare_sandbox()
+    issue = ISSUES[args.issue]
+    if args.naive_baseline and issue["naive_mock_builder"] is None:
+        parser.error(f"--naive-baseline has no control script for issue {args.issue}")
+
+    print(f"[demo] preparing sandbox for issue #{args.issue} (shared base commit, cherry-picked regression tests)...")
+    repo_path, base_commit = prepare_sandbox(issue["test_commit"], issue["commit_message"])
     print(f"[demo] sandbox ready at {repo_path}, base_commit={base_commit[:10]}")
+
+    if args.reset_memory:
+        repo_id = repo_id_for(repo_path)
+        memory_path = os.path.join(STORE_DIR, f"{repo_id}.json")
+        if os.path.exists(memory_path):
+            os.remove(memory_path)
+            print(f"[demo] wiped repo memory at {memory_path}")
 
     groq_key = os.environ.get("GROQ_API_KEY")
     if groq_key:
@@ -227,15 +371,12 @@ def main() -> int:
 
         print("[demo] GROQ_API_KEY found -- using live LiteLLMAdapter(groq/llama-3.3-70b-versatile)")
         adapter = LiteLLMAdapter(model="groq/llama-3.3-70b-versatile", api_key_env="GROQ_API_KEY")
+    elif args.naive_baseline:
+        print("[demo] no GROQ_API_KEY set -- using scripted MockAdapter (naive-baseline control script)")
+        adapter = issue["naive_mock_builder"](repo_path)
     else:
-        one_old = _extract_block(repo_path, "one")
-        only_old = _extract_block(repo_path, "only")
-        if args.naive_baseline:
-            print("[demo] no GROQ_API_KEY set -- using scripted MockAdapter (naive-baseline control script)")
-            adapter = build_naive_mock_adapter_with_blocks(one_old, only_old)
-        else:
-            print("[demo] no GROQ_API_KEY set -- using scripted MockAdapter (deterministic replay)")
-            adapter = build_mock_adapter_with_blocks(one_old, only_old)
+        print("[demo] no GROQ_API_KEY set -- using scripted MockAdapter (deterministic replay)")
+        adapter = issue["mock_builder"](repo_path)
 
     demo_dir = os.path.dirname(os.path.abspath(__file__))
     trajectory_path = os.path.join(demo_dir, "trajectory.jsonl")
@@ -246,9 +387,10 @@ def main() -> int:
     config = RunConfig(
         repo_path=repo_path,
         base_commit=base_commit,
-        issue_text=ISSUE_TEXT,
-        target_test="tests/test_more.py::OneTests::test_falsy_custom_exception",
-        regression_test_paths=["tests/test_more.py::OneTests", "tests/test_more.py::OnlyTests"],
+        issue_text=issue["issue_text"],
+        target_test=issue["target_test"],
+        regression_test_paths=issue["regression_test_paths"],
+        issue_id=issue["issue_id"],
     )
 
     orchestrator = Orchestrator(adapter, config, trajectory, naive_baseline=args.naive_baseline)

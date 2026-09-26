@@ -4,25 +4,34 @@ const COMPARISON_RUNS = [
   { key: "sutra", run: "more-itertools-trajectory", label: "Sutra" },
   { key: "naive", run: "more-itertools-naive-baseline", label: "Naive baseline" },
 ];
+const MEMORY_COMPARISON_RUNS = [
+  { key: "issue1", run: "more-itertools-issue1-trajectory", label: "Issue #1" },
+  { key: "issue2", run: "more-itertools-issue2-trajectory", label: "Issue #2" },
+];
+const DEFAULT_RUN = "more-itertools-issue1-trajectory";
 
 let EVENTS = [];
 let currentIndex = 0;
 let recoveryRange = null; // [startIdx, endIdx] inclusive, or null
+let memoryHitIndex = null; // index of a "memory_read" event that actually found something, or null
 
 const $ = (sel) => document.querySelector(sel);
 
 async function boot() {
   const params = new URLSearchParams(location.search);
-  const run = params.get("run");
-  const url = run ? `/api/trajectory?run=${encodeURIComponent(run)}` : "/api/trajectory";
+  const run = params.get("run") || DEFAULT_RUN;
+  const picker = $("#run-picker");
+  if ([...picker.options].some((o) => o.value === run)) picker.value = run;
 
-  const res = await fetch(url);
+  const res = await fetch(`/api/trajectory?run=${encodeURIComponent(run)}`);
   if (!res.ok) {
     $("#run-status").textContent = "failed to load trajectory";
     return;
   }
   EVENTS = await res.json();
   recoveryRange = findRecoveryRange(EVENTS);
+  memoryHitIndex = EVENTS.findIndex((e) => e.type === "memory_read" && e.payload.hit);
+  if (memoryHitIndex === -1) memoryHitIndex = null;
 
   buildPhaseRail();
   buildEventList();
@@ -30,6 +39,13 @@ async function boot() {
   setScrub(EVENTS.length - 1); // start fully scrubbed-in so the demo opens "complete"
   updateRunStatus();
   loadComparisonChart();
+  loadMemoryComparison();
+
+  picker.addEventListener("change", () => {
+    const url = new URL(location.href);
+    url.searchParams.set("run", picker.value);
+    location.href = url.toString();
+  });
 
   document.addEventListener("keydown", (e) => {
     if (e.target.tagName === "INPUT") return;
@@ -102,6 +118,10 @@ function iconFor(event) {
       return { cls: "icon-triage", glyph: "◈" };
     case "budget_enforced":
       return { cls: "icon-budget_enforced", glyph: "⚠" };
+    case "memory_read":
+      return { cls: "icon-memory_read", glyph: "↙" };
+    case "memory_write":
+      return { cls: "icon-memory_write", glyph: "↗" };
     default:
       return { cls: "icon-phase_start", glyph: "?" };
   }
@@ -147,6 +167,22 @@ function summaryFor(event) {
       return `tier=${p.tier} — ${truncate(p.justification, 70)}`;
     case "budget_enforced":
       return `⚠ forced phase transition — ${truncate(p.reason, 70)}`;
+    case "memory_read": {
+      if (!p.hit) return "repo memory queried — no relevant notes or fresh cache yet";
+      const nEntries = (p.entries || []).length;
+      const cacheFiles = Object.keys(p.cache_hits || {});
+      const parts = [];
+      if (nEntries) parts.push(`${nEntries} prior note${nEntries === 1 ? "" : "s"}`);
+      if (cacheFiles.length) parts.push(`cached index for ${cacheFiles.join(", ")}`);
+      return `↙ repo memory hit — ${parts.join(", ")}`;
+    }
+    case "memory_write": {
+      const counts = Object.entries(p.entries_written || {}).map(([cat, items]) => `${items.length} ${cat}`);
+      const indexed = Object.keys(p.symbol_index_updated || {});
+      const bits = [...counts];
+      if (indexed.length) bits.push(`indexed ${indexed.join(", ")}`);
+      return `↗ wrote to repo memory — ${bits.join(", ") || "nothing new"}`;
+    }
     default:
       return event.type;
   }
@@ -156,6 +192,8 @@ function buildEventList() {
   const list = $("#event-list");
   list.innerHTML = "";
 
+  const memoryRange = memoryHitIndex === null ? null : [memoryHitIndex, Math.min(memoryHitIndex + 1, EVENTS.length - 1)];
+
   let openBlock = null;
   EVENTS.forEach((event, idx) => {
     if (recoveryRange && idx === recoveryRange[0]) {
@@ -164,6 +202,15 @@ function buildEventList() {
       const label = document.createElement("div");
       label.className = "recovery-label";
       label.textContent = "↻ Self-correction: verification failed → reflected → retried → passed";
+      openBlock.appendChild(label);
+      list.appendChild(openBlock);
+    }
+    if (memoryRange && idx === memoryRange[0]) {
+      openBlock = document.createElement("div");
+      openBlock.className = "memory-block";
+      const label = document.createElement("div");
+      label.className = "memory-label";
+      label.textContent = "↙ Repo memory used: prior-run notes/cache read and acted on here";
       openBlock.appendChild(label);
       list.appendChild(openBlock);
     }
@@ -200,6 +247,7 @@ function buildEventList() {
     (openBlock || list).appendChild(row);
 
     if (recoveryRange && idx === recoveryRange[1]) openBlock = null;
+    if (memoryRange && idx === memoryRange[1]) openBlock = null;
   });
 }
 
@@ -317,6 +365,76 @@ function drawBarChart(ctx, width, height, bars) {
     ctx.fillStyle = "#8b93a3";
     ctx.fillText(bar.label, x + barWidth / 2, height - 10);
   });
+}
+
+// ---- issue #1 vs #2 repo-memory comparison --------------------------------
+
+async function loadMemoryComparison() {
+  const table = $("#memory-compare-table");
+  const caption = $("#memory-compare-caption");
+  const entriesList = $("#memory-entries-list");
+  const canvas = $("#memory-chart");
+  const ctx = canvas.getContext("2d");
+
+  let runs;
+  try {
+    runs = await Promise.all(
+      MEMORY_COMPARISON_RUNS.map(async (r) => {
+        const res = await fetch(`/api/trajectory?run=${encodeURIComponent(r.run)}`);
+        if (!res.ok) throw new Error(`missing fixture: ${r.run}`);
+        const events = await res.json();
+        return { ...r, events };
+      })
+    );
+  } catch (err) {
+    caption.textContent = "issue #1/#2 fixtures not available";
+    return;
+  }
+
+  const stats = runs.map((r) => ({
+    label: r.label,
+    tokens: r.events.reduce((sum, e) => sum + (e.tokens_used || 0), 0),
+    toolCalls: r.events.filter((e) => e.type === "tool_call").length,
+    localizeToolCalls: r.events.filter((e) => e.phase === "localize" && e.type === "tool_call").length,
+  }));
+
+  drawBarChart(ctx, canvas.width, canvas.height, stats);
+
+  table.innerHTML = `
+    <tr><th>metric</th><th>${stats[0].label}</th><th>${stats[1].label}</th></tr>
+    <tr><td>tokens</td><td>${stats[0].tokens.toLocaleString()}</td><td>${stats[1].tokens.toLocaleString()}</td></tr>
+    <tr><td>tool calls</td><td>${stats[0].toolCalls}</td><td>${stats[1].toolCalls}</td></tr>
+    <tr><td>localize tool calls</td><td>${stats[0].localizeToolCalls}</td><td>${stats[1].localizeToolCalls}</td></tr>
+  `;
+
+  const tokenSaved = stats[0].tokens ? (1 - stats[1].tokens / stats[0].tokens) * 100 : 0;
+  caption.textContent = `Issue #2 used repo memory from issue #1: ${stats[1].localizeToolCalls} localize tool call(s) vs. ${stats[0].localizeToolCalls} on issue #1, and ${Math.round(tokenSaved)}% fewer tokens overall.`;
+
+  const issue2 = runs.find((r) => r.key === "issue2");
+  const memoryReadEvent = issue2 && issue2.events.find((e) => e.type === "memory_read" && e.payload.hit);
+  entriesList.innerHTML = "";
+  if (memoryReadEvent) {
+    for (const entry of memoryReadEvent.payload.entries || []) {
+      const li = document.createElement("li");
+      const cat = document.createElement("span");
+      cat.className = "entry-category";
+      cat.textContent = entry.category;
+      li.appendChild(cat);
+      li.appendChild(document.createTextNode(entry.note || entry.pattern || ""));
+      entriesList.appendChild(li);
+    }
+    for (const path of Object.keys(memoryReadEvent.payload.cache_hits || {})) {
+      const li = document.createElement("li");
+      const cat = document.createElement("span");
+      cat.className = "entry-category";
+      cat.textContent = "cache";
+      li.appendChild(cat);
+      li.appendChild(document.createTextNode(`fresh symbol index for ${path}`));
+      entriesList.appendChild(li);
+    }
+  } else {
+    entriesList.innerHTML = "<li>no memory hit recorded for issue #2</li>";
+  }
 }
 
 function updateRunStatus() {

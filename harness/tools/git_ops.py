@@ -38,3 +38,13 @@ def git_reset(repo_path: str, to: str = "HEAD") -> dict[str, Any]:
     if proc.returncode != 0:
         return {"ok": False, "error": proc.stderr.strip()}
     return {"ok": True, "reset_to": to}
+
+
+def show_file_at_commit(repo_path: str, commit: str, path: str) -> str | None:
+    """The pristine content of `path` as of `commit`, regardless of what the
+    working tree looks like now (used to build the repo-memory symbol index
+    from the state the agent actually started from, not its own edits)."""
+    proc = _run(repo_path, ["show", f"{commit}:{path}"])
+    if proc.returncode != 0:
+        return None
+    return proc.stdout

@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from harness.model_adapter.base import Message, ModelAdapter
+from harness.memory.memory_writer import extract_memory_entries
+from harness.memory.repo_memory import RepoMemory, repo_id_for
 from harness.memory.trajectory_store import TrajectoryStore
 from harness.orchestrator.budget import BudgetTracker, build_budget_tracker
 from harness.orchestrator.tool_registry import TOOL_SCHEMAS, make_dispatch
@@ -32,6 +34,7 @@ class RunConfig:
     issue_text: str
     target_test: str | None = None
     regression_test_paths: list[str] | None = None
+    issue_id: str = "unknown-issue"
 
 
 @dataclass
@@ -54,6 +57,7 @@ class Orchestrator:
         config: RunConfig,
         trajectory: TrajectoryStore,
         naive_baseline: bool = False,
+        repo_memory: RepoMemory | None = None,
     ):
         self.adapter = adapter
         self.config = config
@@ -64,6 +68,8 @@ class Orchestrator:
         self.tier = ""
         self.triage_justification = ""
         self.dispatch = make_dispatch(config.repo_path)
+        self.repo_memory = repo_memory or RepoMemory(repo_id_for(config.repo_path))
+        self._touched_paths: set[str] = set()
         self.messages: list[Message] = [
             Message(
                 role="system",
@@ -106,6 +112,63 @@ class Orchestrator:
             "understand",
             "triage",
             {"tier": tier, "justification": justification, "budget_profile": self.budget.as_dict()},
+            tokens=usage.total_tokens,
+        )
+
+    def _memory_read(self) -> None:
+        """Queried at the start of Localize, before any fresh search happens."""
+        relevant = self.repo_memory.query_relevant(self.config.issue_text)
+        cache_hits = self.repo_memory.all_fresh_symbol_indexes(self.config.repo_path)
+
+        if not relevant and not cache_hits:
+            self._log("localize", "memory_read", {"hit": False, "entries": [], "cache_hits": {}})
+            return
+
+        lines = []
+        if relevant:
+            lines.append("Prior notes on this repo (from repo memory):")
+            for e in relevant:
+                lines.append(f"- [{e['category']}] {e.get('note') or e.get('pattern')}")
+        if cache_hits:
+            lines.append(
+                "Cached symbol index available for these files (fresh -- unchanged since last "
+                "indexed); no fresh search needed if it already covers what you're looking for:"
+            )
+            for path, index in cache_hits.items():
+                preview = ", ".join(f"{name}:{line}" for name, line in index.items())
+                lines.append(f"- {path}: {{{preview}}}")
+        note_text = "\n".join(lines)
+
+        self.messages.append(Message(role="user", content=note_text))
+        self._log("localize", "memory_read", {"hit": True, "entries": relevant, "cache_hits": cache_hits, "note_text": note_text})
+
+    def _memory_write(self, verified: bool) -> None:
+        """Runs at Finalize regardless of pass/fail -- a failed attempt's
+        landmine is often the single most valuable thing to remember."""
+        transcript_tail = [m for m in self.messages if m.role in ("assistant", "tool") and m.content]
+        summary = "\n".join(f"[{m.role}] {m.content[:300]}" for m in transcript_tail[-40:])
+        trajectory_summary = f"Issue: {self.config.issue_text[:500]}\nVerified: {verified}\n\n{summary}"
+
+        entries, usage = extract_memory_entries(self.adapter, trajectory_summary)
+        self.budget.record("finalize", tokens=usage.total_tokens)
+
+        written: dict[str, list[dict]] = {}
+        for category, items in entries.items():
+            added = self.repo_memory.add_entries(category, items, learned_from_issue=self.config.issue_id)
+            if added:
+                written[category] = added
+
+        indexed_files: dict[str, int] = {}
+        for path in self._touched_paths:
+            pristine = git_ops.show_file_at_commit(self.config.repo_path, self.config.base_commit, path)
+            if pristine is not None:
+                index = self.repo_memory.update_symbol_index(path, pristine)
+                indexed_files[path] = len(index)
+
+        self._log(
+            "finalize",
+            "memory_write",
+            {"entries_written": written, "symbol_index_updated": indexed_files, "repo_id": self.repo_memory.repo_id},
             tokens=usage.total_tokens,
         )
 
@@ -158,6 +221,9 @@ class Orchestrator:
 
             self.budget.record(phase, tool_calls=1)
 
+            if call.name in ("open_file", "edit_file") and "path" in call.arguments:
+                self._touched_paths.add(call.arguments["path"])
+
             self._log(phase, "tool_call", {"name": call.name, "arguments": call.arguments})
             observation = self._execute_tool(call.name, call.arguments)
             self._log(phase, "observation", {"name": call.name, "result": observation})
@@ -189,9 +255,12 @@ class Orchestrator:
             "Read the issue above. In 2-4 sentences, restate the bug and what a correct fix must do. Do not use tools yet.",
         )
 
+        self._memory_read()
+
         self._tool_loop(
             "localize",
             "Use search_code / search_symbol / open_file to locate the exact function(s) responsible for this bug. "
+            "If the repo-memory notes above already give you the file/line, you don't need to search again. "
             "When you've found it, reply with a short summary and no further tool call.",
         )
 
@@ -233,6 +302,8 @@ class Orchestrator:
 
         diff = git_ops.git_diff(self.config.repo_path, base_ref=self.config.base_commit)
         git_ops.git_checkpoint(self.config.repo_path, "agent: final checkpoint")
+
+        self._memory_write(gate_result["verified"])
 
         confidence_report = {
             "gates_passed": sum(1 for g in gate_result["gates"].values() if g["passed"]),

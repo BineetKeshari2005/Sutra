@@ -10,7 +10,14 @@
   <header id="topbar">
     <div id="title-row">
       <h1>Agent Trajectory Timeline</h1>
-      <div id="run-status">loading&hellip;</div>
+      <div id="title-row-right">
+        <select id="run-picker">
+          <option value="more-itertools-issue1-trajectory">Issue #1: one()/only()</option>
+          <option value="more-itertools-issue2-trajectory">Issue #2: constrained_batches()</option>
+          <option value="more-itertools-naive-baseline">Naive baseline (issue #1)</option>
+        </select>
+        <div id="run-status">loading&hellip;</div>
+      </div>
     </div>
     <ol id="phase-rail"></ol>
   </header>
@@ -47,6 +54,16 @@
         <div class="stat-label">Tokens: Sutra vs. naive baseline</div>
         <canvas id="cost-chart" width="228" height="140"></canvas>
         <div id="cost-chart-caption"></div>
+      </div>
+      <div class="stat-block">
+        <div class="stat-label">Repo memory: issue #1 vs #2</div>
+        <canvas id="memory-chart" width="228" height="140"></canvas>
+        <table id="memory-compare-table"></table>
+        <div id="memory-compare-caption"></div>
+      </div>
+      <div class="stat-block">
+        <div class="stat-label">Notes issue #2 started with</div>
+        <ul id="memory-entries-list"></ul>
       </div>
     </aside>
   </main>

@@ -1,9 +1,17 @@
 import subprocess
 
+from harness.memory.repo_memory import RepoMemory, repo_id_for
 from harness.memory.trajectory_store import TrajectoryStore
 from harness.model_adapter.mock_adapter import MockAdapter
 from harness.orchestrator import budget as budget_mod
 from harness.orchestrator.state_machine import Orchestrator, RunConfig
+
+
+def _make_orchestrator(adapter, config, trajectory, tmp_path, **kwargs):
+    # Use a throwaway memory store dir per test instead of the real
+    # harness/memory/store/, so test repos never pollute committed memory state.
+    memory = RepoMemory(repo_id_for(config.repo_path), store_dir=str(tmp_path / "memstore"))
+    return Orchestrator(adapter, config, trajectory, repo_memory=memory, **kwargs)
 
 
 def _make_repo(tmp_path):
@@ -51,7 +59,7 @@ def test_budget_enforcement_forces_cutoff_mid_act(tmp_path, monkeypatch):
 
     trajectory = TrajectoryStore(str(tmp_path / "trajectory.jsonl"))
     config = RunConfig(repo_path=repo_path, base_commit=base_commit, issue_text="add() returns the wrong result")
-    orchestrator = Orchestrator(_oversized_script(), config, trajectory)
+    orchestrator = _make_orchestrator(_oversized_script(), config, trajectory, tmp_path)
     orchestrator.run()
 
     events = trajectory.read_all()
@@ -79,7 +87,7 @@ def test_naive_baseline_never_enforces(tmp_path, monkeypatch):
     # a step as a reflect message instead of a tool call -- use a generous number of
     # tool-bearing steps and assert on the total, not an exact phase-scoped count, so
     # the test isn't coupled to that incidental indexing.
-    orchestrator = Orchestrator(_oversized_script(n_attempts=20), config, trajectory, naive_baseline=True)
+    orchestrator = _make_orchestrator(_oversized_script(n_attempts=20), config, trajectory, tmp_path, naive_baseline=True)
     orchestrator.run()
 
     events = trajectory.read_all()
