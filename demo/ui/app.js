@@ -129,6 +129,8 @@ function iconFor(event) {
       const glyph = v === "red_flag" ? "!" : v === "no_concerns" ? "◎" : "~";
       return { cls: `icon-adversarial_review-${v || "minor_concerns"}`, glyph };
     }
+    case "context_summarized":
+      return { cls: "icon-context_summarized", glyph: "⊟" };
     default:
       return { cls: "icon-phase_start", glyph: "?" };
   }
@@ -196,6 +198,8 @@ function summaryFor(event) {
     }
     case "adversarial_review":
       return `review: ${p.verdict} — ${truncate(p.notes, 70)}`;
+    case "context_summarized":
+      return `⊟ context trimmed — collapsed ${p.collapsed_messages} older messages (${p.collapsed_chars} chars) into one summary`;
     default:
       return event.type;
   }

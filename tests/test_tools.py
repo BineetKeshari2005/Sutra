@@ -57,6 +57,28 @@ def test_search_code_no_match_gives_hint(tiny_repo):
     assert "hint" in result
 
 
+def test_open_file_caps_a_single_oversized_read(tiny_repo):
+    # A dense file whose 200-line default window would exceed the size cap --
+    # simulates a real, sizeable TSX/JSX file, not more-itertools' terse Python.
+    dense_line = "x" * 200 + "\n"  # ~200 chars/line, well over Python's typical density
+    with open(os.path.join(tiny_repo, "dense.py"), "w") as f:
+        f.writelines([dense_line] * 200)
+
+    result = file_ops.open_file(tiny_repo, "dense.py")
+
+    assert result["ok"] is True
+    assert len(result["content"]) <= file_ops.MAX_CONTENT_CHARS
+    assert result["end_line"] < 200  # didn't return the whole 200-line default window
+    assert "size cap" in result["hint"]
+    assert f"start_line={result['end_line'] + 1}" in result["hint"]
+
+
+def test_open_file_under_cap_is_unaffected(tiny_repo):
+    result = file_ops.open_file(tiny_repo, "a.py")
+    assert result["ok"] is True
+    assert "size cap" not in result.get("hint", "")
+
+
 def test_git_checkpoint_commits_changes(tiny_repo):
     file_ops.edit_file(tiny_repo, "b.py", "VALUE = 42", "VALUE = 7")
     result = git_ops.git_checkpoint(tiny_repo, "test commit")

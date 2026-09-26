@@ -422,6 +422,7 @@ main {
 .icon-adversarial_review-no_concerns { background: #16302a; color: var(--green); }
 .icon-adversarial_review-minor_concerns { background: #3a2f16; color: var(--amber); }
 .icon-adversarial_review-red_flag { background: #3a1f22; color: var(--red); }
+.icon-context_summarized { background: #23324f; color: var(--accent); }
 
 .memory-block {
   border: 1.5px solid #3ddc84;

@@ -10,6 +10,13 @@ import os
 from typing import Any
 
 DEFAULT_WINDOW = 200
+# Caps a single open_file observation's own size regardless of how many lines
+# were requested. A 200-line window of dense real-world TSX/JSX can cost far
+# more than 200 lines of terse Python -- this is the fix for one oversized
+# read dominating a phase's whole budget by itself, complementing (not
+# replacing) context_manager's multi-turn summarization for phases with many
+# smaller turns.
+MAX_CONTENT_CHARS = 6_000
 
 
 def _resolve(repo_path: str, path: str) -> str | None:
@@ -47,7 +54,22 @@ def open_file(
         }
 
     window = lines[start_idx:end_idx]
-    numbered = "".join(f"{i + start_idx + 1:>6}\t{line}" for i, line in enumerate(window))
+    numbered_lines = [f"{i + start_idx + 1:>6}\t{line}" for i, line in enumerate(window)]
+    numbered = "".join(numbered_lines)
+
+    size_truncated = False
+    if len(numbered) > MAX_CONTENT_CHARS:
+        size_truncated = True
+        kept: list[str] = []
+        running = 0
+        for line in numbered_lines:
+            if kept and running + len(line) > MAX_CONTENT_CHARS:
+                break
+            kept.append(line)
+            running += len(line)
+        numbered = "".join(kept)
+        end_idx = start_idx + len(kept)
+
     result: dict[str, Any] = {
         "ok": True,
         "path": path,
@@ -56,7 +78,12 @@ def open_file(
         "end_line": end_idx,
         "content": numbered,
     }
-    if end_idx < total:
+    if size_truncated:
+        result["hint"] = (
+            f"content is large; truncated to lines {start_idx + 1}-{end_idx} to stay under a single-read "
+            f"size cap. Pass start_line={end_idx + 1} to continue, or request a narrower range."
+        )
+    elif end_idx < total:
         result["hint"] = f"showing lines {start_idx + 1}-{end_idx} of {total}; pass start_line={end_idx + 1} to continue"
     return result
 

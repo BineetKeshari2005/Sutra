@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from harness.model_adapter.base import Message, ModelAdapter
+from harness.context_manager.budgeter import enforce_ceiling
 from harness.memory.memory_writer import extract_memory_entries
 from harness.memory.repo_memory import RepoMemory, repo_id_for
 from harness.memory.trajectory_store import TrajectoryStore
@@ -192,6 +193,8 @@ class Orchestrator:
     def _tool_loop(self, phase: str, instruction: str) -> None:
         self._log(phase, "phase_start", {"instruction": instruction})
         self.messages.append(Message(role="user", content=instruction))
+        phase_start_idx = len(self.messages) - 1  # index of this phase's own instruction message
+        summarized_this_phase = False
 
         for _ in range(SAFETY_MAX_ITERS_PER_PHASE):
             # Checked before every model call, not just logged after the fact:
@@ -243,6 +246,23 @@ class Orchestrator:
             self.messages.append(
                 Message(role="tool", content=json.dumps(observation), tool_call_id=call.id, name=call.name)
             )
+
+            # Checked after every tool call/observation is appended: once this
+            # phase's cumulative spend crosses ~60% of its ceiling, collapse
+            # everything but the last few turns into one summary message
+            # before it keeps compounding in every future prompt this phase.
+            if not summarized_this_phase:
+                self.messages, summary_info = enforce_ceiling(
+                    self.messages,
+                    phase_start_idx,
+                    self.budget.spend[phase].tokens,
+                    self.budget.budgets[phase].max_tokens,
+                    self.adapter,
+                )
+                if summary_info:
+                    summarized_this_phase = True
+                    self.budget.record(phase, tokens=summary_info["tokens_used"])
+                    self._log(phase, "context_summarized", summary_info, tokens=summary_info["tokens_used"])
 
     def _execute_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         fn = self.dispatch.get(name)
