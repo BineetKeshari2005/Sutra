@@ -30,9 +30,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from harness.memory.repo_memory import STORE_DIR, repo_id_for
 from harness.memory.trajectory_store import TrajectoryStore
+from harness.model_adapter.litellm_adapter import _load_dotenv_once
 from harness.model_adapter.mock_adapter import MockAdapter
 from harness.orchestrator.state_machine import MAX_REFLECT_RETRIES, Orchestrator, RunConfig
 from harness.sandbox.local_sandbox import LocalSandbox
+
+_load_dotenv_once()
 
 REPO_LOCAL_SOURCE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scratch_repos", "more-itertools")
 
@@ -433,14 +436,141 @@ ISSUES = {
 }
 
 
+def live_repo_run(repo_url: str, issue_file: str, max_retries: int, reset_memory: bool, naive_baseline: bool = False) -> int:
+    """Run the orchestrator against an arbitrary GitHub repo + plain-text issue file.
+    Prefers OPENAI_API_KEY (gpt-4o-mini), falls back to GROQ_API_KEY if set.
+    No cherry-pick: clones HEAD directly.
+    Test gates are skipped (target_test=None) since we don't know the test runner.
+    """
+    openai_key = os.environ.get("OPENAI_API_KEY")
+    groq_key = os.environ.get("GROQ_API_KEY")
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if not gemini_key and not openai_key and not groq_key:
+        print("[live] ERROR: set GEMINI_API_KEY, OPENAI_API_KEY, or GROQ_API_KEY in .env")
+        return 1
+
+    with open(issue_file, encoding="utf-8") as f:
+        issue_text = f.read().strip()
+    if not issue_text:
+        print(f"[live] ERROR: issue file '{issue_file}' is empty.")
+        return 1
+
+    # Derive a short issue-id from the filename
+    issue_id = os.path.splitext(os.path.basename(issue_file))[0]
+
+    print(f"[live] cloning {repo_url} ...")
+    sandbox = LocalSandbox(work_root=None)
+    import tempfile
+    run_id = uuid.uuid4().hex[:8]
+    repo_path = tempfile.mkdtemp(prefix=f"agent-run-{run_id}-")
+
+    # Clone and get current HEAD -- no cherry-pick, no base-commit surgery
+    import shutil
+    try:
+        subprocess.run(["git", "clone", "--quiet", "--depth=50", repo_url, repo_path], check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"[live] ERROR: git clone failed: {e}")
+        shutil.rmtree(repo_path, ignore_errors=True)
+        return 1
+
+    subprocess.run(["git", "config", "user.email", "agent@harness.local"], cwd=repo_path, check=True)
+    subprocess.run(["git", "config", "user.name", "SWE Agent Harness"], cwd=repo_path, check=True)
+
+    base_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo_path, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    print(f"[live] cloned OK. HEAD = {base_commit[:12]}  repo at {repo_path}")
+
+    if reset_memory:
+        repo_id = repo_id_for(repo_path)
+        memory_path = os.path.join(STORE_DIR, f"{repo_id}.json")
+        if os.path.exists(memory_path):
+            os.remove(memory_path)
+            print(f"[live] wiped repo memory at {memory_path}")
+
+    from harness.model_adapter.litellm_adapter import LiteLLMAdapter
+    if gemini_key:
+        print("[live] using LiteLLMAdapter(gemini/gemini-3.1-flash-lite) -- FREE tier")
+        adapter = LiteLLMAdapter(model="gemini/gemini-3.1-flash-lite", api_key_env="GEMINI_API_KEY")
+    elif openai_key:
+        print("[live] using LiteLLMAdapter(gpt-4o-mini via OpenAI)")
+        adapter = LiteLLMAdapter(model="gpt-4o-mini", api_key_env="OPENAI_API_KEY")
+    else:
+        print("[live] using LiteLLMAdapter(groq/qwen/qwen3.8-27b) -- WARNING: tool calling may be unreliable")
+        adapter = LiteLLMAdapter(model="groq/qwen/qwen3.8-27b", api_key_env="GROQ_API_KEY")
+
+    demo_dir = os.path.dirname(os.path.abspath(__file__))
+    trajectory_path = os.path.join(demo_dir, "trajectory.jsonl")
+    if os.path.exists(trajectory_path):
+        os.remove(trajectory_path)
+    trajectory = TrajectoryStore(trajectory_path)
+
+    config = RunConfig(
+        repo_path=repo_path,
+        base_commit=base_commit,
+        issue_text=issue_text,
+        target_test=None,          # No pytest harness for non-Python repos
+        regression_test_paths=None,
+        issue_id=issue_id,
+    )
+
+    if naive_baseline:
+        print("[live] --naive-baseline: skipping triage, using the largest ('complex') budget profile, "
+              "never forcing an early phase transition")
+
+    orchestrator = Orchestrator(
+        adapter, config, trajectory,
+        naive_baseline=naive_baseline,
+        max_retries=max_retries,
+    )
+    result = orchestrator.run()
+
+    print()
+    print("=" * 70)
+    print(f"STATUS: {result.status}   tier={result.tier}")
+    print(f"triage justification: {result.triage_justification}")
+    for name, g in result.gates.items():
+        status = "PASS" if g["passed"] else "FAIL"
+        print(f"  [{status}] {name}: {g['detail']}")
+    print(f"retries_used={result.retries_used}  total_tokens={result.total_tokens}  total_tool_calls={result.total_tool_calls}")
+    if result.status == "unresolved":
+        print(f"best_checkpoint={result.best_checkpoint}")
+        print(f"confidence_report={result.confidence_report}")
+    if result.adversarial_review:
+        print(f"adversarial_review={result.adversarial_review}")
+    print("=" * 70)
+    print()
+    print("--- final diff (review this before applying!) ---")
+    print(result.diff)
+    print(f"[live] trajectory log written to {trajectory_path}")
+    print(f"[live] sandbox repo left at {repo_path} for inspection")
+    print(f"[live] NOTE: test gates were skipped (no pytest harness). Review the diff manually.")
+
+    return 0 if result.verified else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Phase 0-4 demo driver")
+
+    # --- live arbitrary-repo mode ---
+    parser.add_argument(
+        "--repo",
+        default=None,
+        help="GitHub URL or local path of the target repo to run against (enables live mode)",
+    )
+    parser.add_argument(
+        "--issue-file",
+        default=None,
+        help="path to a plain-text file containing the issue title + body (required with --repo)",
+    )
+
+    # --- fixture-issue mode (original) ---
     parser.add_argument("--issue", choices=["1", "2", "3"], default="1", help="which real issue to solve (default: 1)")
     parser.add_argument(
         "--naive-baseline",
         action="store_true",
-        help="control condition (issue 1 only): skip triage, always use the largest budget profile, "
-        "never force an early phase transition.",
+        help="control condition: skip triage, always use the largest budget profile, never force an "
+        "early phase transition. Works with fixture issue #1 and with --repo live mode.",
     )
     parser.add_argument(
         "--reset-memory",
@@ -457,6 +587,20 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    # --- Route to live mode if --repo is given ---
+    if args.repo:
+        if not args.issue_file:
+            parser.error("--repo requires --issue-file <path/to/issue.txt>")
+        max_retries = args.max_retries if args.max_retries is not None else MAX_REFLECT_RETRIES
+        return live_repo_run(
+            repo_url=args.repo,
+            issue_file=args.issue_file,
+            max_retries=max_retries,
+            reset_memory=args.reset_memory,
+            naive_baseline=args.naive_baseline,
+        )
+
+    # --- Original fixture mode ---
     issue = ISSUES[args.issue]
     if args.naive_baseline and issue["naive_mock_builder"] is None:
         parser.error(f"--naive-baseline has no control script for issue {args.issue}")
@@ -473,17 +617,28 @@ def main() -> int:
             os.remove(memory_path)
             print(f"[demo] wiped repo memory at {memory_path}")
 
+    openai_key = os.environ.get("OPENAI_API_KEY")
     groq_key = os.environ.get("GROQ_API_KEY")
-    if groq_key:
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if gemini_key:
+        from harness.model_adapter.litellm_adapter import LiteLLMAdapter
+        print("[demo] GEMINI_API_KEY found -- using live LiteLLMAdapter(gemini/gemini-3.1-flash-lite)")
+        adapter = LiteLLMAdapter(model="gemini/gemini-3.1-flash-lite", api_key_env="GEMINI_API_KEY")
+    elif openai_key:
         from harness.model_adapter.litellm_adapter import LiteLLMAdapter
 
-        print("[demo] GROQ_API_KEY found -- using live LiteLLMAdapter(groq/llama-3.3-70b-versatile)")
-        adapter = LiteLLMAdapter(model="groq/llama-3.3-70b-versatile", api_key_env="GROQ_API_KEY")
+        print("[demo] OPENAI_API_KEY found -- using live LiteLLMAdapter(gpt-4o-mini)")
+        adapter = LiteLLMAdapter(model="gpt-4o-mini", api_key_env="OPENAI_API_KEY")
+    elif groq_key:
+        from harness.model_adapter.litellm_adapter import LiteLLMAdapter
+
+        print("[demo] GROQ_API_KEY found -- using live LiteLLMAdapter(groq/qwen/qwen3.8-27b)")
+        adapter = LiteLLMAdapter(model="groq/qwen/qwen3.8-27b", api_key_env="GROQ_API_KEY")
     elif args.naive_baseline:
-        print("[demo] no GROQ_API_KEY set -- using scripted MockAdapter (naive-baseline control script)")
+        print("[demo] no live key set -- using scripted MockAdapter (naive-baseline control script)")
         adapter = issue["naive_mock_builder"](repo_path)
     else:
-        print("[demo] no GROQ_API_KEY set -- using scripted MockAdapter (deterministic replay)")
+        print("[demo] no live key set -- using scripted MockAdapter (deterministic replay)")
         adapter = issue["mock_builder"](repo_path)
 
     demo_dir = os.path.dirname(os.path.abspath(__file__))

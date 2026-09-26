@@ -49,6 +49,7 @@ class LiteLLMAdapter:
         temperature: float = 0.0,
         max_tokens: int = 2048,
     ) -> ModelResponse:
+        import time
         import litellm
 
         kwargs: dict[str, Any] = dict(
@@ -61,7 +62,34 @@ class LiteLLMAdapter:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
 
-        resp = litellm.completion(**kwargs)
+        max_attempts = 6
+        resp = None
+        for attempt in range(max_attempts):
+            try:
+                resp = litellm.completion(**kwargs)
+                break
+            except Exception as e:
+                err_str = str(e).lower()
+                is_transient = any(
+                    k in err_str
+                    for k in [
+                        "503",
+                        "service unavailable",
+                        "high demand",
+                        "rate limit",
+                        "429",
+                        "timeout",
+                        "resource exhausted",
+                    ]
+                )
+                if is_transient and attempt < max_attempts - 1:
+                    sleep_s = 2**attempt + 2
+                    print(
+                        f"[litellm] transient error, retrying in {sleep_s}s (attempt {attempt + 1}/{max_attempts})..."
+                    )
+                    time.sleep(sleep_s)
+                else:
+                    raise
         choice = resp.choices[0].message
 
         tool_calls: list[ToolCall] = []

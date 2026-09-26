@@ -46,9 +46,16 @@ PHASE_SPLIT: dict[str, float] = {
 }
 
 BUDGET_PROFILES: dict[str, dict] = {
-    "trivial": {"total_tokens": 8_000, "max_tool_calls": 15, "phase_split": PHASE_SPLIT},
-    "moderate": {"total_tokens": 25_000, "max_tool_calls": 40, "phase_split": PHASE_SPLIT},
-    "complex": {"total_tokens": 60_000, "max_tool_calls": 90, "phase_split": PHASE_SPLIT},
+    # Originally tuned against more-itertools -- terse, ASCII-dense Python where a
+    # 200-line open_file window costs ~1-2k tokens. A real single file elsewhere
+    # (e.g. a ~450-line TSX/JSX component) can cost 5k+ tokens for ONE open_file
+    # call alone, and that observation then sits in every later prompt in the
+    # phase too. Live runs against arbitrary repos hit the old, smaller ceilings
+    # mid-Act on perfectly reasonable single-file edits -- these are roughly
+    # doubled so one real-sized file plus its edit and a test run comfortably fit.
+    "trivial": {"total_tokens": 15_000, "max_tool_calls": 20, "phase_split": PHASE_SPLIT},
+    "moderate": {"total_tokens": 50_000, "max_tool_calls": 50, "phase_split": PHASE_SPLIT},
+    "complex": {"total_tokens": 100_000, "max_tool_calls": 100, "phase_split": PHASE_SPLIT},
 }
 
 

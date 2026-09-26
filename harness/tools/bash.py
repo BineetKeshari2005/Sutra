@@ -18,10 +18,14 @@ def _preexec_limits():
         return None
 
     def _set():
-        import resource
-
-        resource.setrlimit(resource.RLIMIT_CPU, (CPU_SECONDS_LIMIT, CPU_SECONDS_LIMIT))
-        resource.setrlimit(resource.RLIMIT_AS, (MEMORY_BYTES_LIMIT, MEMORY_BYTES_LIMIT))
+        try:
+            import resource
+            resource.setrlimit(resource.RLIMIT_CPU, (CPU_SECONDS_LIMIT, CPU_SECONDS_LIMIT))
+            # RLIMIT_AS is not supported on macOS -- skip it there
+            if sys.platform != "darwin":
+                resource.setrlimit(resource.RLIMIT_AS, (MEMORY_BYTES_LIMIT, MEMORY_BYTES_LIMIT))
+        except Exception:
+            pass  # rlimit failures must not crash the child process setup
 
     return _set
 
@@ -45,6 +49,8 @@ def run_bash(repo_path: str, command: str, timeout: int = DEFAULT_TIMEOUT) -> di
         }
     except MemoryError:
         return {"ok": False, "error": "command exceeded memory limit"}
+    except subprocess.SubprocessError as e:
+        return {"ok": False, "error": f"subprocess error: {e}"}
 
     output = (proc.stdout + proc.stderr)[-MAX_OUTPUT_CHARS:]
     return {
