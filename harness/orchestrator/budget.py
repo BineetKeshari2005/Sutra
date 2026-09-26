@@ -29,6 +29,29 @@ PHASE_DEFAULTS: dict[str, PhaseBudget] = {
 }
 
 
+# Complexity-tier budget profiles (Phase 2). `phase_split` fractions must sum to
+# 1.0; verify/finalize's shares are carved out first and are non-negotiable --
+# `build_budget_tracker` allocates them before "act" absorbs the remainder, so
+# a big Act phase can never crowd verification out of tokens/tool-calls to run
+# with (in practice verify/finalize don't call the model at all today, but the
+# reservation is what stops Act from being handed the entire budget outright).
+PHASE_SPLIT: dict[str, float] = {
+    "understand": 0.05,
+    "localize": 0.15,
+    "plan": 0.05,
+    "act": 0.55,
+    "verify": 0.05,
+    "reflect": 0.10,
+    "finalize": 0.05,
+}
+
+BUDGET_PROFILES: dict[str, dict] = {
+    "trivial": {"total_tokens": 8_000, "max_tool_calls": 15, "phase_split": PHASE_SPLIT},
+    "moderate": {"total_tokens": 25_000, "max_tool_calls": 40, "phase_split": PHASE_SPLIT},
+    "complex": {"total_tokens": 60_000, "max_tool_calls": 90, "phase_split": PHASE_SPLIT},
+}
+
+
 @dataclass
 class PhaseSpend:
     tool_calls: int = 0
@@ -36,9 +59,10 @@ class PhaseSpend:
 
 
 class BudgetTracker:
-    def __init__(self, budgets: dict[str, PhaseBudget] | None = None):
+    def __init__(self, budgets: dict[str, PhaseBudget] | None = None, tier: str | None = None):
         self.budgets = budgets or {k: PhaseBudget(v.max_tool_calls, v.max_tokens) for k, v in PHASE_DEFAULTS.items()}
         self.spend: dict[str, PhaseSpend] = {p: PhaseSpend() for p in PHASES}
+        self.tier = tier
 
     def set_budget(self, phase: str, max_tool_calls: int, max_tokens: int) -> None:
         self.budgets[phase] = PhaseBudget(max_tool_calls, max_tokens)
@@ -71,3 +95,33 @@ class BudgetTracker:
             }
             for p in PHASES
         }
+
+
+def build_budget_tracker(tier: str) -> BudgetTracker:
+    """Resolve a tier ("trivial"/"moderate"/"complex") into a BudgetTracker
+    with per-phase allocations. verify/finalize/understand/localize/plan/reflect
+    get their exact phase_split share of the tier's totals (their reservation
+    is carved out first); "act" absorbs whatever's left, so rounding never
+    shrinks the non-negotiable phases."""
+    if tier not in BUDGET_PROFILES:
+        raise ValueError(f"unknown budget tier '{tier}'; expected one of {list(BUDGET_PROFILES)}")
+
+    profile = BUDGET_PROFILES[tier]
+    total_tokens, total_calls, split = profile["total_tokens"], profile["max_tool_calls"], profile["phase_split"]
+
+    budgets: dict[str, PhaseBudget] = {}
+    allocated_tokens = allocated_calls = 0
+    for phase in PHASES:
+        if phase == "act":
+            continue
+        tok = max(1, round(total_tokens * split[phase]))
+        calls = max(1, round(total_calls * split[phase]))
+        budgets[phase] = PhaseBudget(max_tool_calls=calls, max_tokens=tok)
+        allocated_tokens += tok
+        allocated_calls += calls
+
+    budgets["act"] = PhaseBudget(
+        max_tool_calls=max(1, total_calls - allocated_calls),
+        max_tokens=max(1, total_tokens - allocated_tokens),
+    )
+    return BudgetTracker(budgets=budgets, tier=tier)

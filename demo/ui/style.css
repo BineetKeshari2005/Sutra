@@ -286,3 +286,33 @@ main {
 #gate-list .gate-mark.pass { color: var(--green); }
 #gate-list .gate-mark.fail { color: var(--red); }
 #gate-list .gate-mark.pending { color: var(--text-dim); }
+
+.tier-value {
+  font-size: 16px;
+  text-transform: capitalize;
+  color: var(--accent);
+}
+
+.tier-justification {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-dim);
+}
+
+#cost-chart {
+  display: block;
+  margin-top: 6px;
+  width: 100%;
+  height: auto;
+}
+
+#cost-chart-caption {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+.icon-triage { background: #2f2a4f; color: var(--purple); }
+.icon-budget_enforced { background: #3a2f16; color: var(--amber); }

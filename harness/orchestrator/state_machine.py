@@ -8,18 +8,21 @@ failed later step can be diffed against a known-good point.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
 from harness.model_adapter.base import Message, ModelAdapter
 from harness.memory.trajectory_store import TrajectoryStore
-from harness.orchestrator.budget import BudgetTracker
+from harness.orchestrator.budget import BudgetTracker, build_budget_tracker
 from harness.orchestrator.tool_registry import TOOL_SCHEMAS, make_dispatch
+from harness.orchestrator.triage import classify_issue
 from harness.tools import git_ops
 from harness.verifier import gates as verifier_gates
 
 MAX_REFLECT_RETRIES = 1
 SAFETY_MAX_ITERS_PER_PHASE = 25
+NAIVE_BASELINE_TIER = "complex"
 
 
 @dataclass
@@ -39,6 +42,8 @@ class RunResult:
     total_tokens: int
     total_tool_calls: int
     retries_used: int
+    tier: str
+    triage_justification: str
     confidence_report: dict[str, Any] = field(default_factory=dict)
 
 
@@ -48,12 +53,16 @@ class Orchestrator:
         adapter: ModelAdapter,
         config: RunConfig,
         trajectory: TrajectoryStore,
-        budget: BudgetTracker | None = None,
+        naive_baseline: bool = False,
     ):
         self.adapter = adapter
         self.config = config
         self.trajectory = trajectory
-        self.budget = budget or BudgetTracker()
+        self.naive_baseline = naive_baseline
+        self.enforce_budget = not naive_baseline
+        self.budget: BudgetTracker | None = None  # set by _triage() at the start of run()
+        self.tier = ""
+        self.triage_justification = ""
         self.dispatch = make_dispatch(config.repo_path)
         self.messages: list[Message] = [
             Message(
@@ -73,6 +82,33 @@ class Orchestrator:
     def _log(self, phase: str, type_: str, payload: dict[str, Any] | None = None, tokens: int = 0) -> None:
         self.trajectory.append(phase, type_, payload, tokens)
 
+    def _log_budget_enforced(self, phase: str, reason: str) -> None:
+        self._log(phase, "budget_enforced", {"reason": reason, "budget": self.budget.as_dict()[phase]})
+
+    def _triage(self) -> None:
+        if self.naive_baseline:
+            self.tier = NAIVE_BASELINE_TIER
+            self.triage_justification = "(naive baseline: triage classifier skipped, always uses the largest budget profile)"
+            self.budget = build_budget_tracker(self.tier)
+            self._log(
+                "understand",
+                "triage",
+                {"tier": self.tier, "justification": self.triage_justification, "budget_profile": self.budget.as_dict(), "skipped": True},
+            )
+            return
+
+        tier, justification, usage = classify_issue(self.adapter, self.config.issue_text)
+        self.tier = tier
+        self.triage_justification = justification
+        self.budget = build_budget_tracker(tier)
+        self.budget.record("understand", tokens=usage.total_tokens)
+        self._log(
+            "understand",
+            "triage",
+            {"tier": tier, "justification": justification, "budget_profile": self.budget.as_dict()},
+            tokens=usage.total_tokens,
+        )
+
     def _single_turn(self, phase: str, instruction: str) -> str:
         self._log(phase, "phase_start", {"instruction": instruction})
         self.messages.append(Message(role="user", content=instruction))
@@ -87,8 +123,11 @@ class Orchestrator:
         self.messages.append(Message(role="user", content=instruction))
 
         for _ in range(SAFETY_MAX_ITERS_PER_PHASE):
-            if self.budget.exhausted(phase):
-                self._log(phase, "observation", {"note": "phase budget exhausted"})
+            # Checked before every model call, not just logged after the fact:
+            # a phase whose budget is already spent is force-transitioned out
+            # rather than allowed to keep going.
+            if self.enforce_budget and self.budget.exhausted(phase):
+                self._log_budget_enforced(phase, "phase budget exhausted before next model call -- forcing phase transition")
                 break
 
             resp = self.adapter.complete(self.messages, tools=TOOL_SCHEMAS)
@@ -101,6 +140,22 @@ class Orchestrator:
 
             call = resp.tool_calls[0]  # exactly one tool call per turn
             self.messages.append(Message(role="assistant", content=resp.content, tool_calls=[call]))
+
+            # Checked again right before executing the tool the model just
+            # requested: this model call's own tokens may have crossed the
+            # ceiling, and the tool must not run once that's true.
+            if self.enforce_budget and self.budget.exhausted(phase):
+                self._log_budget_enforced(phase, f"budget exhausted -- refusing to execute {call.name}, forcing phase transition")
+                observation = {
+                    "ok": False,
+                    "error": "phase budget exhausted",
+                    "hint": "the phase is ending now; proceed to verification with the current diff",
+                }
+                self.messages.append(
+                    Message(role="tool", content=json.dumps(observation), tool_call_id=call.id, name=call.name)
+                )
+                break
+
             self.budget.record(phase, tool_calls=1)
 
             self._log(phase, "tool_call", {"name": call.name, "arguments": call.arguments})
@@ -110,8 +165,6 @@ class Orchestrator:
             if call.name == "edit_file" and observation.get("ok"):
                 ckpt = git_ops.git_checkpoint(self.config.repo_path, f"agent: edit {call.arguments.get('path')}")
                 self._log(phase, "checkpoint", ckpt)
-
-            import json
 
             self.messages.append(
                 Message(role="tool", content=json.dumps(observation), tool_call_id=call.id, name=call.name)
@@ -129,6 +182,8 @@ class Orchestrator:
     # ---- main run loop ---------------------------------------------------
 
     def run(self) -> RunResult:
+        self._triage()
+
         self._single_turn(
             "understand",
             "Read the issue above. In 2-4 sentences, restate the bug and what a correct fix must do. Do not use tools yet.",
@@ -184,6 +239,7 @@ class Orchestrator:
             "gates_total": len(gate_result["gates"]),
             "verified": gate_result["verified"],
             "retries_used": retries,
+            "tier": self.tier,
         }
         self._log("finalize", "run_end", {"confidence_report": confidence_report, "diff_lines": len(diff.get("diff", "").splitlines())})
 
@@ -194,5 +250,7 @@ class Orchestrator:
             total_tokens=self.budget.total_tokens(),
             total_tool_calls=self.budget.total_tool_calls(),
             retries_used=retries,
+            tier=self.tier,
+            triage_justification=self.triage_justification,
             confidence_report=confidence_report,
         )

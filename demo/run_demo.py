@@ -13,6 +13,7 @@ exact same run() call drives a live agent instead.
 """
 from __future__ import annotations
 
+import argparse
 import os
 import subprocess
 import sys
@@ -118,7 +119,7 @@ _FIXED_CORE = (
 )
 
 
-def build_mock_adapter_with_blocks(one_old: str, only_old: str) -> MockAdapter:
+def _fixed_blocks(one_old: str, only_old: str) -> tuple[str, str]:
     one_new = (
         _FIXED_CORE
         + "    if too_short is not None:\n"
@@ -126,8 +127,22 @@ def build_mock_adapter_with_blocks(one_old: str, only_old: str) -> MockAdapter:
         "    raise ValueError('too few items in iterable (expected 1)')\n"
     )
     only_new = _FIXED_CORE + _TRAILER_BY_FUNC["only"]
+    return one_new, only_new
+
+
+def build_mock_adapter_with_blocks(one_old: str, only_old: str) -> MockAdapter:
+    """Sutra's scripted trajectory: a cheap triage call sizes the budget, then a
+    narrow, minimal-context localize/act pass -- narrow enough that it misses
+    only()'s identical bug on the first attempt, catches it for real via the
+    regression gate, and fixes it in a second, budget-aware pass."""
+    one_new, only_new = _fixed_blocks(one_old, only_old)
 
     script = [
+        {"content": (
+            '{"tier": "moderate", "justification": "Two isolated one-line control-flow bugs in '
+            "well-tested pure functions, but the fix touches two similar call sites and needs "
+            'regression coverage across both, so this is more than a trivial one-liner."}'
+        )},
         {"content": (
             "The bug is in one() and only() in more_itertools/more.py: both use "
             "`raise too_long or ValueError(msg)`, which drops a falsy custom exception "
@@ -159,7 +174,49 @@ def build_mock_adapter_with_blocks(one_old: str, only_old: str) -> MockAdapter:
     return MockAdapter(script)
 
 
+def build_naive_mock_adapter_with_blocks(one_old: str, only_old: str) -> MockAdapter:
+    """Control condition: no triage call (skipped by naive_baseline mode itself),
+    no windowed/scoped reading, no incremental verification -- it dumps large
+    unscoped chunks of the file into context (which then sit in every later
+    turn's prompt, uncompressed) and reruns the *entire* suite on every check.
+    It reaches the same correct patch, just by doing substantially more,
+    heavier-context work along the way."""
+    one_new, only_new = _fixed_blocks(one_old, only_old)
+
+    script = [
+        {"content": (
+            "I need to find why one() and only() don't raise falsy custom exceptions "
+            "correctly. Let me look broadly across the codebase for every place this "
+            "'too_long or ValueError' pattern might appear, since I don't yet know how "
+            "many functions share this helper or whether it's duplicated inline."
+        )},
+        {"content": "Searching the whole repo for the pattern.", "tool": {"name": "search_code", "arguments": {"query": "too_long", "path": "."}}},
+        {"content": "That's broad; let me just read the whole implementation file front-to-back to be safe.", "tool": {"name": "open_file", "arguments": {"path": "more_itertools/more.py", "start_line": 1, "end_line": 700}}},
+        {"content": "one() is in there. only() is much further down -- let me read that region too, plus surrounding context in case it's structured differently.", "tool": {"name": "open_file", "arguments": {"path": "more_itertools/more.py", "start_line": 3550, "end_line": 3750}}},
+        {"content": "Found both one() and only(); both use the same buggy pattern. No further search needed."},
+        {"content": (
+            "Plan: fix the `raise too_long or ValueError(msg)` pattern in both one() and only() "
+            "by checking `is not None` explicitly, then run the full test suite to confirm nothing broke."
+        )},
+        {"content": "Applying the fix to one().", "tool": {"name": "edit_file", "arguments": {"path": "more_itertools/more.py", "old_str": one_old, "new_str": one_new}}},
+        {"content": "Applying the fix to only().", "tool": {"name": "edit_file", "arguments": {"path": "more_itertools/more.py", "old_str": only_old, "new_str": only_new}}},
+        {"content": "Running the full test suite to be thorough.", "tool": {"name": "run_tests", "arguments": {}}},
+        {"content": "All tests pass across the full suite. Both functions are fixed."},
+    ]
+    return MockAdapter(script)
+
+
 def main() -> int:
+    parser = argparse.ArgumentParser(description="Phase 0-2 demo driver")
+    parser.add_argument(
+        "--naive-baseline",
+        action="store_true",
+        help="control condition: skip triage, always use the largest ('complex') budget profile, "
+        "never force an early phase transition -- everything else (same issue, same sandbox, same "
+        "verifier) is identical to the normal run.",
+    )
+    args = parser.parse_args()
+
     print("[demo] preparing sandbox (clone + checkout base commit + cherry-pick regression tests)...")
     repo_path, base_commit = prepare_sandbox()
     print(f"[demo] sandbox ready at {repo_path}, base_commit={base_commit[:10]}")
@@ -171,12 +228,17 @@ def main() -> int:
         print("[demo] GROQ_API_KEY found -- using live LiteLLMAdapter(groq/llama-3.3-70b-versatile)")
         adapter = LiteLLMAdapter(model="groq/llama-3.3-70b-versatile", api_key_env="GROQ_API_KEY")
     else:
-        print("[demo] no GROQ_API_KEY set -- using scripted MockAdapter (deterministic replay)")
         one_old = _extract_block(repo_path, "one")
         only_old = _extract_block(repo_path, "only")
-        adapter = build_mock_adapter_with_blocks(one_old, only_old)
+        if args.naive_baseline:
+            print("[demo] no GROQ_API_KEY set -- using scripted MockAdapter (naive-baseline control script)")
+            adapter = build_naive_mock_adapter_with_blocks(one_old, only_old)
+        else:
+            print("[demo] no GROQ_API_KEY set -- using scripted MockAdapter (deterministic replay)")
+            adapter = build_mock_adapter_with_blocks(one_old, only_old)
 
-    trajectory_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trajectory.jsonl")
+    demo_dir = os.path.dirname(os.path.abspath(__file__))
+    trajectory_path = os.path.join(demo_dir, "trajectory.jsonl")
     if os.path.exists(trajectory_path):
         os.remove(trajectory_path)
     trajectory = TrajectoryStore(trajectory_path)
@@ -189,12 +251,13 @@ def main() -> int:
         regression_test_paths=["tests/test_more.py::OneTests", "tests/test_more.py::OnlyTests"],
     )
 
-    orchestrator = Orchestrator(adapter, config, trajectory)
+    orchestrator = Orchestrator(adapter, config, trajectory, naive_baseline=args.naive_baseline)
     result = orchestrator.run()
 
     print()
     print("=" * 70)
-    print(f"VERIFIED: {result.verified}")
+    print(f"VERIFIED: {result.verified}   tier={result.tier}")
+    print(f"triage justification: {result.triage_justification}")
     for name, g in result.gates.items():
         status = "PASS" if g["passed"] else "FAIL"
         print(f"  [{status}] {name}: {g['detail']}")

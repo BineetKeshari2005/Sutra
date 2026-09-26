@@ -1,5 +1,9 @@
 const PHASES = ["understand", "localize", "plan", "act", "verify", "reflect", "finalize"];
 const GATE_ORDER = ["patch_applies", "builds", "target_test_passes", "regression_subset_passes"];
+const COMPARISON_RUNS = [
+  { key: "sutra", run: "more-itertools-trajectory", label: "Sutra" },
+  { key: "naive", run: "more-itertools-naive-baseline", label: "Naive baseline" },
+];
 
 let EVENTS = [];
 let currentIndex = 0;
@@ -25,6 +29,7 @@ async function boot() {
   buildScrub();
   setScrub(EVENTS.length - 1); // start fully scrubbed-in so the demo opens "complete"
   updateRunStatus();
+  loadComparisonChart();
 
   document.addEventListener("keydown", (e) => {
     if (e.target.tagName === "INPUT") return;
@@ -93,6 +98,10 @@ function iconFor(event) {
         : { cls: "icon-verify_gate-fail", glyph: "✕" };
     case "run_end":
       return { cls: "icon-run_end", glyph: "⚑" };
+    case "triage":
+      return { cls: "icon-triage", glyph: "◈" };
+    case "budget_enforced":
+      return { cls: "icon-budget_enforced", glyph: "⚠" };
     default:
       return { cls: "icon-phase_start", glyph: "?" };
   }
@@ -134,6 +143,10 @@ function summaryFor(event) {
       const c = p.confidence_report || {};
       return `run ended — verified=${c.verified}, ${c.gates_passed}/${c.gates_total} gates, ${c.retries_used} retr${c.retries_used === 1 ? "y" : "ies"}`;
     }
+    case "triage":
+      return `tier=${p.tier} — ${truncate(p.justification, 70)}`;
+    case "budget_enforced":
+      return `⚠ forced phase transition — ${truncate(p.reason, 70)}`;
     default:
       return event.type;
   }
@@ -242,6 +255,68 @@ function updateSidebar() {
     li.append(label, mark);
     gateList.appendChild(li);
   }
+
+  const triageEvent = upTo.find((e) => e.type === "triage");
+  $("#stat-tier").textContent = triageEvent ? triageEvent.payload.tier : "–";
+  $("#stat-tier-justification").textContent = triageEvent ? triageEvent.payload.justification : "";
+}
+
+// ---- cost comparison chart ------------------------------------------------
+
+async function loadComparisonChart() {
+  const canvas = $("#cost-chart");
+  const caption = $("#cost-chart-caption");
+  const ctx = canvas.getContext("2d");
+
+  let bars;
+  try {
+    const results = await Promise.all(
+      COMPARISON_RUNS.map(async (r) => {
+        const res = await fetch(`/api/trajectory?run=${encodeURIComponent(r.run)}`);
+        if (!res.ok) throw new Error(`missing fixture: ${r.run}`);
+        const events = await res.json();
+        const tokens = events.reduce((sum, e) => sum + (e.tokens_used || 0), 0);
+        return { ...r, tokens };
+      })
+    );
+    bars = results;
+  } catch (err) {
+    caption.textContent = "comparison fixtures not available";
+    return;
+  }
+
+  drawBarChart(ctx, canvas.width, canvas.height, bars);
+
+  const [sutra, naive] = bars;
+  const multiplier = naive.tokens && sutra.tokens ? (naive.tokens / sutra.tokens).toFixed(1) : "?";
+  caption.textContent = `${sutra.label}: ${sutra.tokens.toLocaleString()} tokens · ${naive.label}: ${naive.tokens.toLocaleString()} tokens — ${multiplier}× more without the budget router, same verified fix.`;
+}
+
+function drawBarChart(ctx, width, height, bars) {
+  ctx.clearRect(0, 0, width, height);
+  const maxVal = Math.max(...bars.map((b) => b.tokens), 1);
+  const padding = { top: 20, bottom: 30, left: 10, right: 10 };
+  const plotHeight = height - padding.top - padding.bottom;
+  const gap = 28;
+  const barWidth = (width - padding.left - padding.right - gap) / bars.length;
+  const colors = ["#5b8cff", "#ffb454"];
+
+  bars.forEach((bar, i) => {
+    const barHeight = Math.max(2, (bar.tokens / maxVal) * plotHeight);
+    const x = padding.left + i * (barWidth + gap);
+    const y = padding.top + (plotHeight - barHeight);
+
+    ctx.fillStyle = colors[i % colors.length];
+    ctx.fillRect(x, y, barWidth, barHeight);
+
+    ctx.fillStyle = "#e6e8ec";
+    ctx.font = "11px -apple-system, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(bar.tokens.toLocaleString(), x + barWidth / 2, y - 4);
+
+    ctx.fillStyle = "#8b93a3";
+    ctx.fillText(bar.label, x + barWidth / 2, height - 10);
+  });
 }
 
 function updateRunStatus() {
