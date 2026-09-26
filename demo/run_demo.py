@@ -439,6 +439,7 @@ ISSUES = {
 def live_repo_run(
     repo_url: str, issue_file: str, max_retries: int, reset_memory: bool,
     naive_baseline: bool = False, create_pr: bool = False,
+    allow_pr_target: str | None = None, confirm_pr: bool = False,
 ) -> int:
     """Run the orchestrator against an arbitrary GitHub repo + plain-text issue file.
     Prefers OPENAI_API_KEY (gpt-4o-mini), falls back to GROQ_API_KEY if set.
@@ -460,6 +461,19 @@ def live_repo_run(
             "then add GITHUB_TOKEN=ghp_... to .env"
         )
         return 1
+    if create_pr:
+        # Fail loud and early -- before cloning or spending a single token on
+        # the agent loop -- rather than only discovering a misconfigured
+        # --create-pr after the whole run finishes. create_pull_request()
+        # re-checks this itself regardless, so this is a fast-fail convenience,
+        # not the actual enforcement point.
+        from harness.integrations.github_pr import check_pr_authorization
+
+        authorized, reason = check_pr_authorization(repo_url, allow_pr_target, confirm_pr)
+        if not authorized:
+            print(f"[live] ERROR: --create-pr refused: {reason}")
+            print("        Pass --allow-pr-target <repo-url> (matching --repo exactly) and --confirm-pr.")
+            return 1
 
     with open(issue_file, encoding="utf-8") as f:
         issue_text = f.read().strip()
@@ -573,6 +587,9 @@ def live_repo_run(
                     issue_id=issue_id,
                     result=result,
                     github_token=github_token,
+                    allowed_target=allow_pr_target,
+                    confirmed=confirm_pr,
+                    trajectory=trajectory,
                 )
                 print(f"[live] PR opened: {pr_url}")
             except GitHubPRError as e:
@@ -600,7 +617,20 @@ def main() -> int:
         "--create-pr",
         action="store_true",
         help="open a real GitHub pull request with the fix if the run is verified (--repo mode only). "
-        "Requires GITHUB_TOKEN in .env. Never triggers on an unresolved run.",
+        "Requires GITHUB_TOKEN, --allow-pr-target, and --confirm-pr. Never triggers on an unresolved run.",
+    )
+    parser.add_argument(
+        "--allow-pr-target",
+        default=None,
+        help="required with --create-pr: the exact repo URL PR creation is allowed to target. Must match "
+        "--repo. There is no default-allowed target -- this exists so --create-pr can never fire "
+        "against an unintended repo.",
+    )
+    parser.add_argument(
+        "--confirm-pr",
+        action="store_true",
+        help="required with --create-pr, in addition to --allow-pr-target: a second, deliberate opt-in "
+        "so a copy-pasted command can't open a real PR by accident.",
     )
 
     # --- fixture-issue mode (original) ---
@@ -638,6 +668,8 @@ def main() -> int:
             reset_memory=args.reset_memory,
             naive_baseline=args.naive_baseline,
             create_pr=args.create_pr,
+            allow_pr_target=args.allow_pr_target,
+            confirm_pr=args.confirm_pr,
         )
 
     # --- Original fixture mode ---

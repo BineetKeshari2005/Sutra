@@ -6,6 +6,15 @@ when the user passes --create-pr explicitly and the run's status is
 "verified". Pushing branches and opening PRs are visible, hard-to-reverse
 actions, so this stays an explicit, opt-in step -- never triggered by
 default, never for an "unresolved" run.
+
+Two independent opt-ins are required before anything is actually pushed,
+enforced inside create_pull_request() itself (not just by the CLI, so
+calling this function directly can never skip the check):
+  1. --allow-pr-target <repo-url> must match the run's target repo exactly
+     -- there is no default-allowed target.
+  2. --confirm-pr must also be passed in the same invocation.
+Every attempt is logged as a pr_creation_attempt trajectory event, whether
+it proceeds or is refused, so it's auditable after the fact either way.
 """
 from __future__ import annotations
 
@@ -81,6 +90,36 @@ def _changed_files(diff_text: str) -> list[str]:
     return re.findall(r"^diff --git a/(.+?) b/.+$", diff_text, re.MULTILINE)
 
 
+def check_pr_authorization(repo_url: str, allowed_target: str | None, confirmed: bool) -> tuple[bool, str]:
+    """Pure, no-network authorization check -- deliberately separate from
+    create_pull_request() so it's trivial to unit test every refusal path
+    without touching the GitHub API. There is no default-on path: a missing
+    or mismatched --allow-pr-target refuses, and a missing --confirm-pr
+    refuses even when the target is allowlisted."""
+    if not allowed_target:
+        return False, "no --allow-pr-target supplied -- refusing (there is no default-allowed target)"
+
+    try:
+        target_owner, target_repo = _parse_owner_repo(repo_url)
+    except GitHubPRError as e:
+        return False, f"could not parse target repo URL: {e}"
+    try:
+        allowed_owner, allowed_repo = _parse_owner_repo(allowed_target)
+    except GitHubPRError as e:
+        return False, f"could not parse --allow-pr-target: {e}"
+
+    if (target_owner.lower(), target_repo.lower()) != (allowed_owner.lower(), allowed_repo.lower()):
+        return False, (
+            f"target repo '{target_owner}/{target_repo}' does not match "
+            f"--allow-pr-target '{allowed_owner}/{allowed_repo}' -- refusing"
+        )
+
+    if not confirmed:
+        return False, "target is allowlisted but --confirm-pr was not passed -- refusing"
+
+    return True, "allowlisted and confirmed"
+
+
 def _compose_pr_body(issue_text: str, issue_number: int | None, result: Any) -> str:
     files = _changed_files(result.diff) or ["(see diff)"]
     files_block = "\n".join(f"- `{f}`" for f in files)
@@ -119,30 +158,90 @@ _Generated autonomously by [Sutra-AI](https://github.com/BineetKeshari2005/Sutra
 """
 
 
-def create_pull_request(repo_path: str, repo_url: str, issue_text: str, issue_id: str, result: Any, github_token: str) -> str:
+def create_pull_request(
+    repo_path: str,
+    repo_url: str,
+    issue_text: str,
+    issue_id: str,
+    result: Any,
+    github_token: str,
+    *,
+    allowed_target: str | None = None,
+    confirmed: bool = False,
+    trajectory: Any = None,
+) -> str:
     """Pushes the fix already committed in `repo_path` as a branch and opens a
     PR against `repo_url`. Forks automatically if the token's user lacks push
-    access. Returns the PR's html_url."""
+    access. Returns the PR's html_url.
+
+    Refuses unless `repo_url` matches `allowed_target` AND `confirmed` is True
+    -- checked here, not just by the CLI layer that calls this, so calling
+    this function directly can never skip the check. Every attempt (blocked
+    or not) is logged to `trajectory` if one is given, so a PR attempt is
+    always auditable after the fact even when it was refused.
+    """
+    authorized, reason = check_pr_authorization(repo_url, allowed_target, confirmed)
+    if trajectory is not None:
+        trajectory.append(
+            "finalize",
+            "pr_creation_attempt",
+            {
+                "repo_url": repo_url,
+                "allowed_target": allowed_target,
+                "confirmed": confirmed,
+                "authorized": authorized,
+                "reason": reason,
+            },
+        )
+    if not authorized:
+        raise GitHubPRError(f"PR creation refused: {reason}")
+
     owner, repo = _parse_owner_repo(repo_url)
 
     upstream = _api_request("GET", f"/repos/{owner}/{repo}", github_token)
     default_branch = upstream.get("default_branch", "main")
     can_push = upstream.get("permissions", {}).get("push", False)
 
+    user = _api_request("GET", "/user", github_token)
+    user_login = user.get("login", "")
+
     if can_push:
         push_owner, push_repo = owner, repo
     else:
-        print(f"[github_pr] no push access to {owner}/{repo} -- forking...")
-        fork = _api_request("POST", f"/repos/{owner}/{repo}/forks", github_token, data={})
-        push_owner, push_repo = fork["owner"]["login"], fork["name"]
-        for attempt in range(FORK_POLL_ATTEMPTS):
+        # Check if the user already has a fork of this repository
+        already_forked = False
+        if user_login:
             try:
-                _api_request("GET", f"/repos/{push_owner}/{push_repo}", github_token)
-                break
+                user_repo = _api_request("GET", f"/repos/{user_login}/{repo}", github_token)
+                if user_repo.get("fork"):
+                    already_forked = True
+                    push_owner, push_repo = user_login, repo
+                    print(f"[github_pr] found existing fork at {push_owner}/{push_repo}")
             except GitHubPRError:
-                if attempt == FORK_POLL_ATTEMPTS - 1:
-                    raise
-                time.sleep(FORK_POLL_DELAY_SECONDS)
+                pass
+
+        if not already_forked:
+            print(f"[github_pr] no push access to {owner}/{repo} -- forking...")
+            try:
+                fork = _api_request("POST", f"/repos/{owner}/{repo}/forks", github_token, data={})
+                push_owner, push_repo = fork["owner"]["login"], fork["name"]
+            except GitHubPRError as e:
+                if "403" in str(e):
+                    raise GitHubPRError(
+                        f"GitHub API fork failed (fine-grained PATs cannot fork external repositories via API).\n"
+                        f"Fix this either by:\n"
+                        f"  1) Forking https://github.com/{owner}/{repo} in your browser (click 'Fork' at top right), OR\n"
+                        f"  2) Using a Classic Token (ghp_...) with 'repo' scope from https://github.com/settings/tokens."
+                    ) from None
+                raise
+            for attempt in range(FORK_POLL_ATTEMPTS):
+                try:
+                    _api_request("GET", f"/repos/{push_owner}/{push_repo}", github_token)
+                    break
+                except GitHubPRError:
+                    if attempt == FORK_POLL_ATTEMPTS - 1:
+                        raise
+                    time.sleep(FORK_POLL_DELAY_SECONDS)
 
     short_sha = _run_git(repo_path, ["rev-parse", "--short", "HEAD"], github_token).stdout.strip()
     branch_name = f"fix/{issue_id}-{short_sha}"
