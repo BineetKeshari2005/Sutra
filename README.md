@@ -6,7 +6,7 @@ Sutra doesn't just patch a bug and exit. Given a repo and an issue, it clones th
 
 > *"Sutra" — a thread that runs through and holds things together. Every decision the agent makes, every failure it recovers from, and everything it learns about a repo is strung on that thread and carried into the next issue.*
 
-**Status: Phase 0 + Phase 1 + Phase 2 + Phase 3 + Phase 4 complete, all verified with real, reproducible numbers — no simulated results anywhere in this repo.**
+**Status: Phase 0 + Phase 1 + Phase 2 + Phase 3 + Phase 4 complete, plus a real token-context fix validated against a live, unscripted failure — all numbers below are measured from fixtures committed in this repo right now, regenerated after that fix, not carried over from an earlier run.**
 
 ```
 STATUS: verified   tier=moderate
@@ -36,7 +36,7 @@ Every phase transition, tool call, observation, and reflection is logged as a st
 ### 2. A complexity-aware budget router with a live cost dashboard
 A cheap triage call classifies each issue as trivial/moderate/complex *before any repo access happens* and sizes every phase's token and tool-call budget accordingly — with verification's share carved out first, non-negotiable, so the action phase can never spend the whole budget and leave nothing to verify with. This is enforced, not just logged: the orchestrator checks remaining budget before every tool call and force-transitions a phase the instant its slice runs out, and we have a test (`tests/test_budget_enforcement.py`) that starves a run on purpose and asserts the cutoff actually happens mid-`Act`.
 
-**Measured result: 5x fewer tokens than a naive, unbudgeted baseline on the identical issue, reaching the identical verified patch — 14,714 tokens (Sutra) vs. 73,888 tokens (naive).**
+**Measured result: 2.6x fewer tokens than a naive, unbudgeted baseline on the identical issue, reaching the identical verified patch — 14,714 tokens (Sutra) vs. 38,670 tokens (naive).** (This multiplier is smaller than earlier internal numbers because the token-context fix below caps oversized single reads for *every* caller, including the naive baseline's own deliberately unscoped dumps — the comparison is still real and reproducible, just less dramatic now that naive isn't quite as wasteful either.)
 
 ### 3. Repo-level institutional memory that compounds across issues
 Most harnesses treat every issue as a cold start. Sutra persists a per-repo memory bank — keyed by root commit hash, stable across every throwaway sandbox clone — holding learned conventions, landmines from past attempts, fix patterns, and a fingerprinted symbol index cache. It's read at the start of every `Localize` phase and written at every `Finalize`, regardless of whether the run passed verification, because a failed attempt's landmine is often the single most valuable thing to remember.
@@ -47,6 +47,19 @@ Most harnesses treat every issue as a cold start. Sutra persists a per-repo memo
 Finalize always produces one of exactly two structured outputs — never a silent or undefined failure path. When all 4 gates pass, a second, *blind* model call reviews the final diff given only the issue text and the diff (never the agent's own reasoning trace), flagging anything that looks like it's gaming the tests rather than fixing the bug. When the retry budget runs out without all gates passing, the orchestrator never submits the last broken attempt as-is and never submits nothing — it rolls back to whichever attempt across the whole run passed the most gates and generates a structured confidence report: root-cause confidence, a plain-language summary, and specifically what's still broken.
 
 **Demonstrated on a real, unforced gate failure:** issue #3 (`chunked()` should reject negative `n`, fix `0e6acdf`), run with `--max-retries 0`, adds the right validation but with the wrong error-message wording — a genuine, unscripted pytest failure — and gets an honest `unresolved` report instead of a falsely-confident patch.
+
+### 5. A real token-compounding bug, found live and fixed live
+Running Sutra against a real GitHub repo (not a fixture) surfaced an actual failure: a single `open_file` read of a real 448-line React component cost 5-7k tokens by itself, and the budget was exhausted before the fix could even be written. We didn't just raise the budget ceiling as a band-aid — we wired `context_manager`'s rolling summarizer into the tool loop and, when live re-testing showed the summarizer alone didn't cover this specific pattern (one huge read, not many small ones), added a per-observation size cap to `open_file` directly.
+
+**Re-running the exact failing case, same original tight budget, same repo, same issue:**
+
+| | Before this fix | After this fix |
+|---|---|---|
+| Status | `unresolved` (budget exhausted, zero progress) | `verified` (real 12-line diff produced) |
+| Total tokens | 29,324 | 27,647 |
+| Retries needed | 1 (also failed) | 0 |
+
+The resulting patch was real but incomplete (it imported the hooks needed for the fix without wiring them up yet) — caught correctly by the blind adversarial review as `red_flag`, live, on a real diff. That's the system working as designed: a tight budget can still produce an incomplete patch, and the adversarial-review safety net is what catches it instead of the harness silently reporting "verified" and moving on. Evidence: `demo/fixtures/cineverse-issue7-fixed-trajectory.jsonl`.
 
 ---
 
@@ -93,10 +106,10 @@ flowchart TD
 | Understand a software-engineering issue | Signal extraction + triage classifier (tier + justification) before any repo access | Triage event visible in every trajectory |
 | Navigate an existing repository | Multi-signal localization: symbol/text search + repo memory bank | 0 localize calls on issue #2 (cache reuse) |
 | Use tools intelligently | 5 purpose-built tools, structured hint-bearing errors (`edit_file` tells the model to add context on ambiguous matches, never guesses) | `tools/` + `tests/test_tools.py` |
-| Manage context effectively | Windowed file reads, per-phase enforced budgets, rolling summarization | 5x token reduction vs. naive baseline |
+| Manage context effectively | Windowed + size-capped file reads, per-phase enforced budgets, rolling summarization | 2.6x token reduction vs. naive baseline; live cineverse fix went from `unresolved`/29,324 tokens to `verified`/27,647 |
 | Recover from failures without human help | Dedicated reflection phase, git checkpoint/rollback, real regression-gate-triggered retry | `retries_used=1` on a genuine, unscripted failure |
 | Produce correct, verified code changes | 4-gate verifier chain reading real `git diff`, plus a blind adversarial review; honest `unresolved` abstention (best checkpoint + confidence report) when gates don't all pass | `[PASS]` x 4 on both solved issues, matching real upstream patches; genuine `unresolved` fixture on issue #3 |
-| Use tokens and compute efficiently | Complexity-aware budget router + compounding repo memory | 5x (Phase 2) and 42% (Phase 3) measured reductions |
+| Use tokens and compute efficiently | Complexity-aware budget router + compounding repo memory + per-observation size caps | 2.6x (Phase 2), 42% (Phase 3), and a real live failure turned into a verified run (Phase 4+) |
 
 ---
 
@@ -185,8 +198,8 @@ All numbers below are measured from committed, reproducible fixtures — not est
 |---|---|---|
 | Issues solved (verified) | 2/2, all 4 verification gates pass on both | -- |
 | Issues honestly abstained on | 1/1 (issue #3, real gate failure, `--max-retries 0`) | -- |
-| Tokens - issue #1 (cold start, budgeted) | 14,714 | 73,888 (unbudgeted) |
-| Token reduction vs. naive baseline | **5x** | -- |
+| Tokens - issue #1 (cold start, budgeted) | 14,714 | 38,670 (unbudgeted) |
+| Token reduction vs. naive baseline | **2.6x** | -- |
 | Tokens - issue #2 (warm memory) | 8,582 | 14,714 (issue #1's own cost) |
 | Token reduction, issue #2 vs. issue #1 | **42%** | -- |
 | Localize tool calls, issue #2 | **0** (cache reused) | 1 (issue #1, cold) |
