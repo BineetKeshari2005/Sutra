@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from harness.memory.repo_memory import STORE_DIR, repo_id_for
 from harness.memory.trajectory_store import TrajectoryStore
 from harness.model_adapter.mock_adapter import MockAdapter
-from harness.orchestrator.state_machine import Orchestrator, RunConfig
+from harness.orchestrator.state_machine import MAX_REFLECT_RETRIES, Orchestrator, RunConfig
 from harness.sandbox.local_sandbox import LocalSandbox
 
 REPO_LOCAL_SOURCE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scratch_repos", "more-itertools")
@@ -43,6 +43,11 @@ SHARED_BASE_COMMIT = "19ddb972845ab0e5b9b7449d3fd5930781407441"
 
 ISSUE1_FIX_COMMIT = "def2dabea858b6ecb84ee0c52e6e07929f2c409c"  # one()/only(), test+fix combined
 ISSUE2_TEST_COMMIT = "87d12578c3e558c57fbfbe663be63259c1fce56f"  # constrained_batches, test-only
+
+# Issue #3 uses its own base commit (doesn't need to share a fingerprint with
+# anything -- it's demonstrating Part A's abstention path, not repo memory).
+ISSUE3_BASE_COMMIT = "516f0a80fb7c2c8562dbb5e318fc2a3d44f4171f"
+ISSUE3_FIX_COMMIT = "0e6acdf9b60765ecf9634d6f5c132ac1bebc616b"  # chunked(), test+fix combined
 
 ISSUE1_TEXT = """\
 one()/only() silently swallow a falsy custom exception
@@ -87,25 +92,39 @@ must be greater than zero') for any max_count <= 0, right after the existing
 max_size check.
 """
 
+ISSUE3_TEXT = """\
+chunked() leaks an internal islice error message for negative n
 
-def prepare_sandbox(test_commit: str, commit_message: str) -> tuple[str, str]:
-    """Clone the repo, check out SHARED_BASE_COMMIT, cherry-pick ONLY the
+`chunked(iterable, n)` is the only one of the sizing functions (sliced(),
+tail(), etc.) without a guard on a negative *n*: passing n=-1 leaks islice's
+internal message ("Stop argument for islice() must be None or an integer:
+0 <= x <= sys.maxsize") instead of a clear, repo-consistent error.
+
+Expected: chunked() should validate n up front and raise
+`ValueError('n must be at least 0')` for any n < 0, exactly matching the
+wording sliced() and tail() already use for the same condition. n=None
+(single chunk) and n=0 must remain unchanged.
+"""
+
+
+def prepare_sandbox(base_commit: str, test_commit: str, commit_message: str) -> tuple[str, str]:
+    """Clone the repo, check out base_commit, cherry-pick ONLY the
     regression-test half of a real fix commit (so the sandbox starts with
     failing tests and unfixed source), and return (repo_path, new_base_commit)."""
     sandbox = LocalSandbox(work_root=None)
-    handle = sandbox.create(REPO_LOCAL_SOURCE, SHARED_BASE_COMMIT, run_id=uuid.uuid4().hex[:8])
+    handle = sandbox.create(REPO_LOCAL_SOURCE, base_commit, run_id=uuid.uuid4().hex[:8])
     repo_path = handle.repo_path
 
     subprocess.run(["git", "cherry-pick", "-n", test_commit], cwd=repo_path, check=True)
     # cherry-pick -n staged the change in the index too, so `checkout -- <path>`
     # (which restores from the index) would be a no-op there; explicitly restore
-    # any non-test files it touched from SHARED_BASE_COMMIT.
+    # any non-test files it touched from base_commit.
     changed = subprocess.run(
         ["git", "diff", "--name-only", "HEAD"], cwd=repo_path, capture_output=True, text=True, check=True
     ).stdout.split()
     non_test = [f for f in changed if not f.startswith("tests/")]
     if non_test:
-        subprocess.run(["git", "checkout", SHARED_BASE_COMMIT, "--", *non_test], cwd=repo_path, check=True)
+        subprocess.run(["git", "checkout", base_commit, "--", *non_test], cwd=repo_path, check=True)
     subprocess.run(["git", "commit", "-m", commit_message], cwd=repo_path, check=True)
     new_base = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=repo_path, capture_output=True, text=True, check=True
@@ -219,6 +238,11 @@ def build_issue1_mock_adapter(repo_path: str) -> MockAdapter:
             '"`raise X or default` silently drops a falsy X; replace with an explicit `if X is not None: '
             'raise X` / `else` split."}]}'
         )},
+        {"content": (
+            '{"verdict": "no_concerns", "notes": "The diff replaces the `or`-based check with explicit '
+            '`is not None` checks in both one() and only(), directly matching the issue -- no test-gaming '
+            'patterns (no hardcoded values, no broadened exception handling)."}'
+        )},
     ]
     return MockAdapter(script)
 
@@ -251,6 +275,10 @@ def build_naive_mock_adapter(repo_path: str) -> MockAdapter:
         {"content": "Running the full test suite to be thorough.", "tool": {"name": "run_tests", "arguments": {}}},
         {"content": "All tests pass across the full suite. Both functions are fixed."},
         {"content": "{}"},  # naive baseline: no memory write worth logging
+        {"content": (
+            '{"verdict": "no_concerns", "notes": "Same fix as the budgeted run -- explicit `is not None` '
+            'checks in one() and only() -- just reached via a more expensive path."}'
+        )},
     ]
     return MockAdapter(script)
 
@@ -305,12 +333,69 @@ def build_issue2_mock_adapter() -> MockAdapter:
             '"a validated parameter (max_size) has an unvalidated sibling (max_count) that should '
             'follow the same raise-ValueError pattern."}]}'
         )},
+        {"content": (
+            '{"verdict": "no_concerns", "notes": "Adds a validation check mirroring the existing '
+            'max_size check one line above -- minimal, matches the issue, no test-gaming."}'
+        )},
+    ]
+    return MockAdapter(script)
+
+
+# ---- issue #3: chunked() -- deliberately exercised with --max-retries 0 ----
+# so a genuinely incomplete first attempt (real gate failure, not fabricated)
+# demonstrates Part A's calibrated-abstention path instead of retrying past it.
+
+_CHUNKED_OLD_ANCHOR = "    iterator = iter(partial(take, n, iter(iterable)), [])\n    if strict:\n"
+# Plausible but WRONG: the agent picks its own wording instead of matching the
+# sibling convention (sliced()/tail() both say "n must be at least 0"), so the
+# real regex-matching test genuinely fails when this actually runs.
+_CHUNKED_NEW_ANCHOR_WRONG = (
+    "    if n is not None and n < 0:\n"
+    "        raise ValueError('n cannot be negative')\n"
+    "\n"
+    "    iterator = iter(partial(take, n, iter(iterable)), [])\n"
+    "    if strict:\n"
+)
+
+
+def build_issue3_mock_adapter() -> MockAdapter:
+    """A plausible-but-wrong single attempt: validates n, but with a message
+    that doesn't match the sibling convention the test asserts against. Run
+    with --max-retries 0, this is a REAL pytest failure (not scripted to fail)
+    that Part A's abstention path has to handle honestly."""
+    script = [
+        {"content": (
+            '{"tier": "trivial", "justification": "A single missing validation check on one function."}'
+        )},
+        {"content": "chunked() should raise ValueError for negative n, the way sliced() and tail() already do."},
+        {"content": "Searching for chunked().", "tool": {"name": "search_symbol", "arguments": {"symbol_name": "chunked", "path": "more_itertools"}}},
+        {"content": "Found chunked() -- no further search needed."},
+        {"content": "Plan: add a guard at the top of chunked() raising ValueError for n < 0."},
+        {"content": "Applying the fix.", "tool": {"name": "edit_file", "arguments": {"path": "more_itertools/more.py", "old_str": _CHUNKED_OLD_ANCHOR, "new_str": _CHUNKED_NEW_ANCHOR_WRONG}}},
+        {"content": "Running the regression test.", "tool": {"name": "run_tests", "arguments": {"test_path": "tests/test_more.py::ChunkedTests::test_negative"}}},
+        {"content": "The test still fails -- the exception is raised, but the message doesn't match what the test expects."},
+        {"content": (
+            '{"conventions": [], '
+            '"landmines": [{"path": "more_itertools/more.py", "symbol": "chunked", "note": "sizing-function '
+            'error messages (sliced(), tail()) use the exact wording \\"n must be at least 0\\" -- match it '
+            'verbatim rather than paraphrasing."}], '
+            '"fix_patterns": []}'
+        )},
+        {"content": (
+            '{"root_cause_confidence": "medium", '
+            '"root_cause_summary": "chunked() now validates negative n, but the error message wording '
+            '(\\"n cannot be negative\\") does not match the exact string the regression test asserts '
+            '(\\"n must be at least 0\\"), which mirrors sliced()/tail()\'s existing convention.", '
+            '"unresolved_issue": "The fix is functionally close but the retry budget was exhausted before '
+            'a second attempt could correct the message wording to match the sibling functions."}'
+        )},
     ]
     return MockAdapter(script)
 
 
 ISSUES = {
     "1": {
+        "base_commit": SHARED_BASE_COMMIT,
         "test_commit": ISSUE1_FIX_COMMIT,
         "commit_message": "test: add regression tests for one()/only() falsy-exception bug",
         "issue_text": ISSUE1_TEXT,
@@ -319,8 +404,10 @@ ISSUES = {
         "regression_test_paths": ["tests/test_more.py::OneTests", "tests/test_more.py::OnlyTests"],
         "mock_builder": lambda repo_path: build_issue1_mock_adapter(repo_path),
         "naive_mock_builder": lambda repo_path: build_naive_mock_adapter(repo_path),
+        "default_max_retries": None,
     },
     "2": {
+        "base_commit": SHARED_BASE_COMMIT,
         "test_commit": ISSUE2_TEST_COMMIT,
         "commit_message": "test: add regression tests for constrained_batches nonpositive max_count",
         "issue_text": ISSUE2_TEXT,
@@ -329,13 +416,26 @@ ISSUES = {
         "regression_test_paths": ["tests/test_more.py::ConstrainedBatchesTests"],
         "mock_builder": lambda repo_path: build_issue2_mock_adapter(),
         "naive_mock_builder": None,
+        "default_max_retries": None,
+    },
+    "3": {
+        "base_commit": ISSUE3_BASE_COMMIT,
+        "test_commit": ISSUE3_FIX_COMMIT,
+        "commit_message": "test: add regression test for chunked() negative n",
+        "issue_text": ISSUE3_TEXT,
+        "issue_id": "chunked-negative-n",
+        "target_test": "tests/test_more.py::ChunkedTests::test_negative",
+        "regression_test_paths": ["tests/test_more.py::ChunkedTests"],
+        "mock_builder": lambda repo_path: build_issue3_mock_adapter(),
+        "naive_mock_builder": None,
+        "default_max_retries": 0,  # exercise the abstention path on a real, unforced gate failure
     },
 }
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Phase 0-3 demo driver")
-    parser.add_argument("--issue", choices=["1", "2"], default="1", help="which real issue to solve (default: 1)")
+    parser = argparse.ArgumentParser(description="Phase 0-4 demo driver")
+    parser.add_argument("--issue", choices=["1", "2", "3"], default="1", help="which real issue to solve (default: 1)")
     parser.add_argument(
         "--naive-baseline",
         action="store_true",
@@ -348,14 +448,22 @@ def main() -> int:
         help="wipe this repo's memory bank before running -- use before issue #1 for a genuinely "
         "fresh/empty memory bank in the two-issue demo.",
     )
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=None,
+        help="override the reflect/retry allowance (default: 1). Issue #3 defaults to 0, to exercise "
+        "Part A's calibrated-abstention path on a real, unforced gate failure.",
+    )
     args = parser.parse_args()
 
     issue = ISSUES[args.issue]
     if args.naive_baseline and issue["naive_mock_builder"] is None:
         parser.error(f"--naive-baseline has no control script for issue {args.issue}")
+    max_retries = args.max_retries if args.max_retries is not None else issue["default_max_retries"]
 
-    print(f"[demo] preparing sandbox for issue #{args.issue} (shared base commit, cherry-picked regression tests)...")
-    repo_path, base_commit = prepare_sandbox(issue["test_commit"], issue["commit_message"])
+    print(f"[demo] preparing sandbox for issue #{args.issue} (cherry-picked regression tests)...")
+    repo_path, base_commit = prepare_sandbox(issue["base_commit"], issue["test_commit"], issue["commit_message"])
     print(f"[demo] sandbox ready at {repo_path}, base_commit={base_commit[:10]}")
 
     if args.reset_memory:
@@ -393,20 +501,28 @@ def main() -> int:
         issue_id=issue["issue_id"],
     )
 
-    orchestrator = Orchestrator(adapter, config, trajectory, naive_baseline=args.naive_baseline)
+    orchestrator = Orchestrator(
+        adapter, config, trajectory, naive_baseline=args.naive_baseline,
+        max_retries=max_retries if max_retries is not None else MAX_REFLECT_RETRIES,
+    )
     result = orchestrator.run()
 
     print()
     print("=" * 70)
-    print(f"VERIFIED: {result.verified}   tier={result.tier}")
+    print(f"STATUS: {result.status}   tier={result.tier}")
     print(f"triage justification: {result.triage_justification}")
     for name, g in result.gates.items():
         status = "PASS" if g["passed"] else "FAIL"
         print(f"  [{status}] {name}: {g['detail']}")
     print(f"retries_used={result.retries_used}  total_tokens={result.total_tokens}  total_tool_calls={result.total_tool_calls}")
+    if result.status == "unresolved":
+        print(f"best_checkpoint={result.best_checkpoint}")
+        print(f"confidence_report={result.confidence_report}")
+    if result.adversarial_review:
+        print(f"adversarial_review={result.adversarial_review}")
     print("=" * 70)
     print()
-    print("--- final diff ---")
+    print("--- final diff (best checkpoint) ---")
     print(result.diff)
     print(f"[demo] trajectory log written to {trajectory_path}")
     print(f"[demo] sandbox repo left at {repo_path} for inspection")

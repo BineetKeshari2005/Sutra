@@ -21,6 +21,8 @@ from harness.orchestrator.tool_registry import TOOL_SCHEMAS, make_dispatch
 from harness.orchestrator.triage import classify_issue
 from harness.tools import git_ops
 from harness.verifier import gates as verifier_gates
+from harness.verifier.adversarial_review import review_diff
+from harness.verifier.confidence_report import generate_confidence_report
 
 MAX_REFLECT_RETRIES = 1
 SAFETY_MAX_ITERS_PER_PHASE = 25
@@ -40,6 +42,7 @@ class RunConfig:
 @dataclass
 class RunResult:
     verified: bool
+    status: str  # "verified" | "unresolved"
     gates: dict[str, Any]
     diff: str
     total_tokens: int
@@ -47,7 +50,10 @@ class RunResult:
     retries_used: int
     tier: str
     triage_justification: str
-    confidence_report: dict[str, Any] = field(default_factory=dict)
+    best_checkpoint: str | None = None
+    confidence_report: dict[str, Any] | None = None  # Part A: only set when status == "unresolved"
+    adversarial_review: dict[str, Any] | None = None  # Part B: only set when status == "verified"
+    run_summary: dict[str, Any] = field(default_factory=dict)
 
 
 class Orchestrator:
@@ -58,11 +64,13 @@ class Orchestrator:
         trajectory: TrajectoryStore,
         naive_baseline: bool = False,
         repo_memory: RepoMemory | None = None,
+        max_retries: int = MAX_REFLECT_RETRIES,
     ):
         self.adapter = adapter
         self.config = config
         self.trajectory = trajectory
         self.naive_baseline = naive_baseline
+        self.max_retries = max_retries
         self.enforce_budget = not naive_baseline
         self.budget: BudgetTracker | None = None  # set by _triage() at the start of run()
         self.tier = ""
@@ -271,6 +279,7 @@ class Orchestrator:
 
         retries = 0
         gate_result: dict[str, Any] = {"verified": False, "gates": {}}
+        attempts: list[dict[str, Any]] = []  # [{"commit": sha, "gate_result": ...}, ...] -- every attempt this run made
         while True:
             self._tool_loop(
                 "act",
@@ -286,8 +295,9 @@ class Orchestrator:
                 self.config.regression_test_paths,
             )
             self._log("verify", "verify_gate", gate_result)
+            attempts.append({"commit": git_ops.get_head(self.config.repo_path), "gate_result": gate_result})
 
-            if gate_result["verified"] or retries >= MAX_REFLECT_RETRIES:
+            if gate_result["verified"] or retries >= self.max_retries:
                 break
 
             retries += 1
@@ -300,28 +310,80 @@ class Orchestrator:
                 "Diagnose the root cause in 2-3 sentences, then state what you'll change next. No tools.",
             )
 
+        verified = gate_result["verified"]
+        best_attempt = self._pick_best_attempt(attempts)
+        best_commit = best_attempt["commit"]
+        best_gates = best_attempt["gate_result"]["gates"]
+
+        if not verified:
+            # Never submit the last (broken) attempt as-is and never submit
+            # nothing: roll back to whichever attempt passed the most gates.
+            git_ops.git_reset(self.config.repo_path, to=best_commit)
+        else:
+            git_ops.git_checkpoint(self.config.repo_path, "agent: final checkpoint")
+
         diff = git_ops.git_diff(self.config.repo_path, base_ref=self.config.base_commit)
-        git_ops.git_checkpoint(self.config.repo_path, "agent: final checkpoint")
 
-        self._memory_write(gate_result["verified"])
+        self._memory_write(verified)
 
-        confidence_report = {
-            "gates_passed": sum(1 for g in gate_result["gates"].values() if g["passed"]),
-            "gates_total": len(gate_result["gates"]),
-            "verified": gate_result["verified"],
+        run_summary = {
+            "gates_passed": sum(1 for g in best_gates.values() if g["passed"]),
+            "gates_total": len(best_gates),
+            "verified": verified,
             "retries_used": retries,
             "tier": self.tier,
         }
-        self._log("finalize", "run_end", {"confidence_report": confidence_report, "diff_lines": len(diff.get("diff", "").splitlines())})
+
+        confidence_report = None
+        adversarial_review = None
+        if verified:
+            adversarial_review, review_usage = review_diff(self.adapter, self.config.issue_text, diff.get("diff", ""))
+            self.budget.record("finalize", tokens=review_usage.total_tokens)
+            self._log("finalize", "adversarial_review", adversarial_review, tokens=review_usage.total_tokens)
+        else:
+            transcript_tail = [m for m in self.messages if m.role in ("assistant", "tool") and m.content]
+            summary = "\n".join(f"[{m.role}] {m.content[:300]}" for m in transcript_tail[-40:])
+            trajectory_summary = f"Issue: {self.config.issue_text[:500]}\n\n{summary}"
+            confidence_report, cr_usage = generate_confidence_report(self.adapter, trajectory_summary, attempts_made=len(attempts))
+            self.budget.record("finalize", tokens=cr_usage.total_tokens)
+            self._log(
+                "finalize",
+                "confidence_report",
+                {
+                    "best_checkpoint": best_commit,
+                    "gates_at_best_checkpoint": {name: g["passed"] for name, g in best_gates.items()},
+                    "confidence_report": confidence_report,
+                },
+                tokens=cr_usage.total_tokens,
+            )
+
+        self._log("finalize", "run_end", {"run_summary": run_summary, "diff_lines": len(diff.get("diff", "").splitlines())})
 
         return RunResult(
-            verified=gate_result["verified"],
-            gates=gate_result["gates"],
+            verified=verified,
+            status="verified" if verified else "unresolved",
+            gates=best_gates,
             diff=diff.get("diff", ""),
             total_tokens=self.budget.total_tokens(),
             total_tool_calls=self.budget.total_tool_calls(),
             retries_used=retries,
             tier=self.tier,
             triage_justification=self.triage_justification,
+            best_checkpoint=None if verified else best_commit,
             confidence_report=confidence_report,
+            adversarial_review=adversarial_review,
+            run_summary=run_summary,
         )
+
+    @staticmethod
+    def _pick_best_attempt(attempts: list[dict[str, Any]]) -> dict[str, Any]:
+        """Highest gate-pass-count across every attempt this run made, not
+        necessarily the last one. Ties prefer the later attempt."""
+        def gates_passed(a: dict[str, Any]) -> int:
+            return sum(1 for g in a["gate_result"]["gates"].values() if g["passed"])
+
+        best = attempts[0]
+        for a in attempts[1:]:
+            if gates_passed(a) >= gates_passed(best):
+                best = a
+        return best

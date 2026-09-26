@@ -40,6 +40,10 @@ def git_reset(repo_path: str, to: str = "HEAD") -> dict[str, Any]:
     return {"ok": True, "reset_to": to}
 
 
+def get_head(repo_path: str) -> str:
+    return _run(repo_path, ["rev-parse", "HEAD"]).stdout.strip()
+
+
 def show_file_at_commit(repo_path: str, commit: str, path: str) -> str | None:
     """The pristine content of `path` as of `commit`, regardless of what the
     working tree looks like now (used to build the repo-memory symbol index

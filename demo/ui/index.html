@@ -14,6 +14,7 @@
         <select id="run-picker">
           <option value="more-itertools-issue1-trajectory">Issue #1: one()/only()</option>
           <option value="more-itertools-issue2-trajectory">Issue #2: constrained_batches()</option>
+          <option value="more-itertools-issue3-unresolved-trajectory">Issue #3: chunked() (unresolved)</option>
           <option value="more-itertools-naive-baseline">Naive baseline (issue #1)</option>
         </select>
         <div id="run-status">loading&hellip;</div>
@@ -44,6 +45,13 @@
       <div class="stat-block">
         <div class="stat-label">Verification gates</div>
         <ul id="gate-list"></ul>
+        <span id="review-badge" class="review-badge" style="display:none;"></span>
+      </div>
+      <div id="unresolved-block" class="unresolved-block" style="display:none;">
+        <div class="unresolved-label">&#9670; Unresolved: best checkpoint submitted, not a silent failure</div>
+        <div class="unresolved-row"><span class="unresolved-key">Root cause (<span id="unresolved-confidence"></span> confidence):</span> <span id="unresolved-summary"></span></div>
+        <div class="unresolved-row"><span class="unresolved-key">Still broken:</span> <span id="unresolved-issue"></span></div>
+        <div class="unresolved-row"><span class="unresolved-key">Attempts made:</span> <span id="unresolved-attempts"></span></div>
       </div>
       <div class="stat-block">
         <div class="stat-label">Complexity tier</div>

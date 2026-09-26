@@ -122,6 +122,13 @@ function iconFor(event) {
       return { cls: "icon-memory_read", glyph: "↙" };
     case "memory_write":
       return { cls: "icon-memory_write", glyph: "↗" };
+    case "confidence_report":
+      return { cls: "icon-confidence_report", glyph: "◆" }; // diamond, not a pass/fail check-or-cross: honest uncertainty, not failure
+    case "adversarial_review": {
+      const v = event.payload?.verdict;
+      const glyph = v === "red_flag" ? "!" : v === "no_concerns" ? "◎" : "~";
+      return { cls: `icon-adversarial_review-${v || "minor_concerns"}`, glyph };
+    }
     default:
       return { cls: "icon-phase_start", glyph: "?" };
   }
@@ -160,7 +167,7 @@ function summaryFor(event) {
       return `verified=${p.verified} (${passed}/${Object.keys(gates).length} gates passed)`;
     }
     case "run_end": {
-      const c = p.confidence_report || {};
+      const c = p.run_summary || {};
       return `run ended — verified=${c.verified}, ${c.gates_passed}/${c.gates_total} gates, ${c.retries_used} retr${c.retries_used === 1 ? "y" : "ies"}`;
     }
     case "triage":
@@ -183,6 +190,12 @@ function summaryFor(event) {
       if (indexed.length) bits.push(`indexed ${indexed.join(", ")}`);
       return `↗ wrote to repo memory — ${bits.join(", ") || "nothing new"}`;
     }
+    case "confidence_report": {
+      const cr = p.confidence_report || {};
+      return `◆ unresolved — best checkpoint ${truncate(p.best_checkpoint, 10)}, confidence: ${cr.root_cause_confidence}`;
+    }
+    case "adversarial_review":
+      return `review: ${p.verdict} — ${truncate(p.notes, 70)}`;
     default:
       return event.type;
   }
@@ -307,6 +320,30 @@ function updateSidebar() {
   const triageEvent = upTo.find((e) => e.type === "triage");
   $("#stat-tier").textContent = triageEvent ? triageEvent.payload.tier : "–";
   $("#stat-tier-justification").textContent = triageEvent ? triageEvent.payload.justification : "";
+
+  const reviewEvent = upTo.find((e) => e.type === "adversarial_review");
+  const reviewBadge = $("#review-badge");
+  if (reviewEvent) {
+    reviewBadge.style.display = "inline-block";
+    reviewBadge.className = `review-badge ${reviewEvent.payload.verdict}`;
+    reviewBadge.textContent = `review: ${reviewEvent.payload.verdict.replace(/_/g, " ")}`;
+    reviewBadge.title = reviewEvent.payload.notes || "";
+  } else {
+    reviewBadge.style.display = "none";
+  }
+
+  const confidenceEvent = upTo.find((e) => e.type === "confidence_report");
+  const unresolvedBlock = $("#unresolved-block");
+  if (confidenceEvent) {
+    unresolvedBlock.style.display = "block";
+    const cr = confidenceEvent.payload.confidence_report || {};
+    $("#unresolved-confidence").textContent = cr.root_cause_confidence || "?";
+    $("#unresolved-summary").textContent = cr.root_cause_summary || "";
+    $("#unresolved-issue").textContent = cr.unresolved_issue || "";
+    $("#unresolved-attempts").textContent = cr.attempts_made ?? "?";
+  } else {
+    unresolvedBlock.style.display = "none";
+  }
 }
 
 // ---- cost comparison chart ------------------------------------------------
@@ -443,7 +480,7 @@ function updateRunStatus() {
     $("#run-status").textContent = `${EVENTS.length} events`;
     return;
   }
-  const c = runEnd.payload.confidence_report || {};
+  const c = runEnd.payload.run_summary || {};
   $("#run-status").textContent = `verified: ${c.verified} · ${c.gates_passed}/${c.gates_total} gates · ${c.retries_used} retr${c.retries_used === 1 ? "y" : "ies"} · ${EVENTS.length} events`;
 }
 
