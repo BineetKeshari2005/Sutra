@@ -119,6 +119,12 @@ flowchart TD
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
+# Interactive mode -- no flags: asks for a repo, then an issue (paste text or a
+# file path, auto-detected), confirms once, then runs completely uninterrupted.
+# When it finishes, a menu lets you review the real diff and optionally open a
+# PR (prompts for a token with getpass -- never echoed, never in shell history).
+python demo/run_demo.py
+
 # Phase 0/1: solve the first issue against a scripted, cost-free MockAdapter
 python demo/run_demo.py --issue 1
 
@@ -143,6 +149,15 @@ python -m pytest tests/ -q
 Set `GROQ_API_KEY` (see `.env.example`) to switch from the deterministic `MockAdapter` to a live model via `LiteLLMAdapter` — no other code changes needed, since every LLM call in the harness goes through the same `ModelAdapter` interface.
 
 The dashboard loads committed fixtures (`demo/fixtures/*.jsonl`) by default, so the full demo — timeline, cost comparison, memory comparison, and the unresolved/review panels — has **zero dependency on a live model call succeeding at demo time**. `GET /api/trajectory/live` will tail a real in-progress run if one exists.
+
+## Opening a real PR
+
+Two paths, two safety models -- neither weaker than the other:
+
+- **Interactive** (`python demo/run_demo.py`, no flags): after a run finishes, choosing "Create PR" from the menu and then typing a token when prompted (via `getpass`, never echoed) *are* the confirmation -- an explicit menu choice plus an explicit token entry, no separate flags needed.
+- **Scripted / CI** (`--repo <url> --issue-file <file> --create-pr`): requires `--allow-pr-target <repo-url>` (must match `--repo` exactly) *and* `--confirm-pr` in the same invocation. There is no default-allowed target; a copy-pasted command can't open a PR by accident.
+
+Both paths share the same `create_pull_request()` (forks automatically if the token's user lacks push access) and log every attempt -- blocked or not -- as a `pr_creation_attempt` trajectory event noting which mode triggered it.
 
 ---
 

@@ -90,12 +90,24 @@ def _changed_files(diff_text: str) -> list[str]:
     return re.findall(r"^diff --git a/(.+?) b/.+$", diff_text, re.MULTILINE)
 
 
-def check_pr_authorization(repo_url: str, allowed_target: str | None, confirmed: bool) -> tuple[bool, str]:
+def check_pr_authorization(
+    repo_url: str, allowed_target: str | None, confirmed: bool, interactive: bool = False
+) -> tuple[bool, str]:
     """Pure, no-network authorization check -- deliberately separate from
     create_pull_request() so it's trivial to unit test every refusal path
     without touching the GitHub API. There is no default-on path: a missing
     or mismatched --allow-pr-target refuses, and a missing --confirm-pr
-    refuses even when the target is allowlisted."""
+    refuses even when the target is allowlisted.
+
+    `interactive=True` is the one alternate path: the interactive menu flow's
+    two affirmative actions (explicitly choosing "Create PR" from a menu, then
+    explicitly typing a token when prompted) stand in for --allow-pr-target
+    and --confirm-pr. This substitution applies ONLY when the caller is the
+    interactive flow -- the flag-based path never sets this, so it keeps
+    requiring both flags exactly as before."""
+    if interactive:
+        return True, "interactive mode: explicit menu choice + token entry"
+
     if not allowed_target:
         return False, "no --allow-pr-target supplied -- refusing (there is no default-allowed target)"
 
@@ -168,24 +180,29 @@ def create_pull_request(
     *,
     allowed_target: str | None = None,
     confirmed: bool = False,
+    interactive: bool = False,
     trajectory: Any = None,
 ) -> str:
     """Pushes the fix already committed in `repo_path` as a branch and opens a
     PR against `repo_url`. Forks automatically if the token's user lacks push
     access. Returns the PR's html_url.
 
-    Refuses unless `repo_url` matches `allowed_target` AND `confirmed` is True
-    -- checked here, not just by the CLI layer that calls this, so calling
-    this function directly can never skip the check. Every attempt (blocked
-    or not) is logged to `trajectory` if one is given, so a PR attempt is
-    always auditable after the fact even when it was refused.
+    Refuses unless authorized -- checked here, not just by the CLI layer that
+    calls this, so calling this function directly can never skip the check.
+    Authorization is either `repo_url` matching `allowed_target` AND
+    `confirmed` being True (the flag-based path), or `interactive=True` (the
+    menu-driven path's own two affirmative actions -- see
+    check_pr_authorization). Every attempt (blocked or not) is logged to
+    `trajectory` if one is given, noting which mode triggered it, so a PR
+    attempt is always auditable after the fact even when it was refused.
     """
-    authorized, reason = check_pr_authorization(repo_url, allowed_target, confirmed)
+    authorized, reason = check_pr_authorization(repo_url, allowed_target, confirmed, interactive)
     if trajectory is not None:
         trajectory.append(
             "finalize",
             "pr_creation_attempt",
             {
+                "mode": "interactive" if interactive else "flag",
                 "repo_url": repo_url,
                 "allowed_target": allowed_target,
                 "confirmed": confirmed,

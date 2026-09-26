@@ -599,7 +599,238 @@ def live_repo_run(
     return 0 if result.verified else 1
 
 
+def _detect_issue_text(raw: str) -> str:
+    """A file path if `raw` names an existing file, otherwise the raw text
+    itself -- no separate prompt asking which, per Part A."""
+    if os.path.isfile(raw):
+        with open(raw, encoding="utf-8") as f:
+            return f.read().strip()
+    return raw.strip()
+
+
+def _prompt_repo() -> str:
+    while True:
+        repo = input("Which repository? (URL or local path): ").strip()
+        if repo:
+            return repo
+        print("  Please enter a repository URL or path.")
+
+
+def _prompt_issue() -> str:
+    while True:
+        raw = input("What's the issue? (paste text, or a path to a file): ").strip()
+        if raw:
+            return _detect_issue_text(raw)
+        print("  Please enter issue text or a file path.")
+
+
+def _confirm_start(repo_url: str, issue_text: str) -> bool:
+    preview = issue_text[:150].replace("\n", " ")
+    if len(issue_text) > 150:
+        preview += "..."
+    print()
+    print(f"Repo: {repo_url}")
+    print(f"Issue preview: {preview}")
+    try:
+        input("Press Enter to start, or Ctrl+C to cancel: ")
+        return True
+    except KeyboardInterrupt:
+        print("\nCancelled.")
+        return False
+
+
+def _clone_and_run_interactive(
+    repo_url: str, issue_text: str, issue_id: str,
+) -> tuple[Any, str, TrajectoryStore] | tuple[None, None, None]:
+    """Clone + run for the interactive flow specifically -- deliberately a
+    separate function from live_repo_run rather than a shared refactor, so
+    the existing flag-based path's behavior stays byte-for-byte unchanged
+    (Part A's explicit requirement) no matter what this one needs to return
+    or how its control flow evolves.
+    """
+    openai_key = os.environ.get("OPENAI_API_KEY")
+    groq_key = os.environ.get("GROQ_API_KEY")
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if not gemini_key and not openai_key and not groq_key:
+        print("ERROR: set GEMINI_API_KEY, OPENAI_API_KEY, or GROQ_API_KEY in .env")
+        return None, None, None
+
+    print(f"Cloning {repo_url} ...")
+    import shutil
+    import tempfile
+
+    run_id = uuid.uuid4().hex[:8]
+    repo_path = tempfile.mkdtemp(prefix=f"agent-run-{run_id}-")
+    try:
+        subprocess.run(["git", "clone", "--quiet", "--depth=50", repo_url, repo_path], check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"ERROR: git clone failed: {e}")
+        shutil.rmtree(repo_path, ignore_errors=True)
+        return None, None, None
+
+    subprocess.run(["git", "config", "user.email", "agent@harness.local"], cwd=repo_path, check=True)
+    subprocess.run(["git", "config", "user.name", "SWE Agent Harness"], cwd=repo_path, check=True)
+    base_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo_path, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    print(f"Cloned OK. HEAD = {base_commit[:12]}  repo at {repo_path}")
+
+    from harness.model_adapter.litellm_adapter import LiteLLMAdapter
+
+    if gemini_key:
+        print("Using gemini/gemini-3.1-flash-lite (free tier)")
+        adapter = LiteLLMAdapter(model="gemini/gemini-3.1-flash-lite", api_key_env="GEMINI_API_KEY")
+    elif openai_key:
+        print("Using gpt-4o-mini via OpenAI")
+        adapter = LiteLLMAdapter(model="gpt-4o-mini", api_key_env="OPENAI_API_KEY")
+    else:
+        print("Using groq/qwen/qwen3.8-27b -- tool calling may be unreliable")
+        adapter = LiteLLMAdapter(model="groq/qwen/qwen3.8-27b", api_key_env="GROQ_API_KEY")
+
+    demo_dir = os.path.dirname(os.path.abspath(__file__))
+    trajectory_path = os.path.join(demo_dir, "trajectory.jsonl")
+    if os.path.exists(trajectory_path):
+        os.remove(trajectory_path)
+    trajectory = TrajectoryStore(trajectory_path)
+
+    config = RunConfig(
+        repo_path=repo_path,
+        base_commit=base_commit,
+        issue_text=issue_text,
+        target_test=None,
+        regression_test_paths=None,
+        issue_id=issue_id,
+    )
+
+    print()
+    print("Running -- Understand -> Localize -> Plan -> Act -> Verify -> Finalize, uninterrupted...")
+    print()
+    orchestrator = Orchestrator(adapter, config, trajectory, max_retries=MAX_REFLECT_RETRIES)
+    result = orchestrator.run()
+    return result, repo_path, trajectory
+
+
+def _print_run_summary(result: Any) -> None:
+    print()
+    print("=" * 70)
+    print(f"Run complete: {result.status.upper()}")
+    print(f"triage justification: {result.triage_justification}")
+    for name, g in result.gates.items():
+        status = "PASS" if g["passed"] else "FAIL"
+        print(f"  [{status}] {name}: {g['detail']}")
+    print(f"retries_used={result.retries_used}  total_tokens={result.total_tokens}  total_tool_calls={result.total_tool_calls}")
+    if result.adversarial_review:
+        print(f"adversarial_review={result.adversarial_review}")
+    print("=" * 70)
+
+
+def _show_diff_and_confidence(result: Any) -> None:
+    print()
+    print("--- diff ---")
+    print(result.diff or "(no diff)")
+    if result.status == "unresolved":
+        cr = result.confidence_report or {}
+        print()
+        print("--- confidence report ---")
+        print(f"best_checkpoint: {result.best_checkpoint}")
+        print(f"gates at best checkpoint: {result.gates}")
+        print(f"root_cause_confidence: {cr.get('root_cause_confidence')}")
+        print(f"root_cause_summary: {cr.get('root_cause_summary')}")
+        print(f"unresolved_issue: {cr.get('unresolved_issue')}")
+
+
+def _create_pr_flow_interactive(repo_path: str, repo_url: str, issue_text: str, issue_id: str, result: Any, trajectory: TrajectoryStore) -> None:
+    if not result.verified:
+        print(f"Cannot create a PR: run status is '{result.status}', not verified.")
+        return
+
+    import getpass
+
+    token = getpass.getpass("GitHub personal access token (repo scope): ").strip()
+    if not token:
+        print("No token entered -- cancelling PR creation.")
+        return
+
+    from harness.integrations.github_pr import GitHubPRError, create_pull_request
+
+    print("Opening a pull request...")
+    try:
+        pr_url = create_pull_request(
+            repo_path=repo_path,
+            repo_url=repo_url,
+            issue_text=issue_text,
+            issue_id=issue_id,
+            result=result,
+            github_token=token,
+            interactive=True,
+            trajectory=trajectory,
+        )
+        print(f"PR opened: {pr_url}")
+    except GitHubPRError as e:
+        print(f"ERROR: PR creation failed: {e}")
+
+
+def _review_submenu() -> str:
+    while True:
+        print()
+        print("  1) Create PR")
+        print("  2) End")
+        choice = input("  Choice: ").strip()
+        if choice == "1":
+            return "pr"
+        if choice == "2":
+            return "end"
+        print("  Please choose 1 or 2.")
+
+
+def _post_run_menu(repo_path: str, repo_url: str, issue_text: str, issue_id: str, result: Any, trajectory: TrajectoryStore) -> int:
+    while True:
+        print()
+        print("What would you like to do?")
+        print("  1) Review code")
+        print("  2) Create PR")
+        print("  3) End")
+        choice = input("Choice: ").strip()
+
+        if choice == "1":
+            _show_diff_and_confidence(result)
+            if _review_submenu() == "pr":
+                _create_pr_flow_interactive(repo_path, repo_url, issue_text, issue_id, result, trajectory)
+            else:
+                print("Goodbye.")
+                return 0
+        elif choice == "2":
+            _create_pr_flow_interactive(repo_path, repo_url, issue_text, issue_id, result, trajectory)
+        elif choice == "3":
+            print("Ending. No PR created.")
+            return 0
+        else:
+            print("Please choose 1, 2, or 3.")
+
+
+def interactive_run() -> int:
+    """Part A + B: no-flags entry point. Setup happens up front (repo, issue,
+    a single confirmation gate), the phase loop then runs fully uninterrupted
+    to a final state, and only then does a post-run menu appear."""
+    print("=== Sutra interactive setup ===")
+    repo_url = _prompt_repo()
+    issue_text = _prompt_issue()
+    if not _confirm_start(repo_url, issue_text):
+        return 0
+
+    issue_id = f"interactive-{uuid.uuid4().hex[:8]}"
+    result, repo_path, trajectory = _clone_and_run_interactive(repo_url, issue_text, issue_id)
+    if result is None:
+        return 1
+
+    _print_run_summary(result)
+    return _post_run_menu(repo_path, repo_url, issue_text, issue_id, result, trajectory)
+
+
 def main() -> int:
+    if len(sys.argv) == 1:
+        return interactive_run()
+
     parser = argparse.ArgumentParser(description="Phase 0-4 demo driver")
 
     # --- live arbitrary-repo mode ---
