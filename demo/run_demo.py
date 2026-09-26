@@ -436,7 +436,10 @@ ISSUES = {
 }
 
 
-def live_repo_run(repo_url: str, issue_file: str, max_retries: int, reset_memory: bool, naive_baseline: bool = False) -> int:
+def live_repo_run(
+    repo_url: str, issue_file: str, max_retries: int, reset_memory: bool,
+    naive_baseline: bool = False, create_pr: bool = False,
+) -> int:
     """Run the orchestrator against an arbitrary GitHub repo + plain-text issue file.
     Prefers OPENAI_API_KEY (gpt-4o-mini), falls back to GROQ_API_KEY if set.
     No cherry-pick: clones HEAD directly.
@@ -447,6 +450,15 @@ def live_repo_run(repo_url: str, issue_file: str, max_retries: int, reset_memory
     gemini_key = os.environ.get("GEMINI_API_KEY")
     if not gemini_key and not openai_key and not groq_key:
         print("[live] ERROR: set GEMINI_API_KEY, OPENAI_API_KEY, or GROQ_API_KEY in .env")
+        return 1
+
+    github_token = os.environ.get("GITHUB_TOKEN")
+    if create_pr and not github_token:
+        print(
+            "[live] ERROR: --create-pr requires GITHUB_TOKEN to be set (env var or .env file).\n"
+            "        Create a token at https://github.com/settings/tokens with 'repo' scope, "
+            "then add GITHUB_TOKEN=ghp_... to .env"
+        )
         return 1
 
     with open(issue_file, encoding="utf-8") as f:
@@ -546,6 +558,27 @@ def live_repo_run(repo_url: str, issue_file: str, max_retries: int, reset_memory
     print(f"[live] sandbox repo left at {repo_path} for inspection")
     print(f"[live] NOTE: test gates were skipped (no pytest harness). Review the diff manually.")
 
+    if create_pr:
+        if not result.verified:
+            print(f"[live] --create-pr requested but status is '{result.status}', not 'verified' -- skipping PR creation.")
+        else:
+            from harness.integrations.github_pr import GitHubPRError, create_pull_request
+
+            print("[live] opening a pull request...")
+            try:
+                pr_url = create_pull_request(
+                    repo_path=repo_path,
+                    repo_url=repo_url,
+                    issue_text=issue_text,
+                    issue_id=issue_id,
+                    result=result,
+                    github_token=github_token,
+                )
+                print(f"[live] PR opened: {pr_url}")
+            except GitHubPRError as e:
+                print(f"[live] ERROR: PR creation failed: {e}")
+                return 1
+
     return 0 if result.verified else 1
 
 
@@ -562,6 +595,12 @@ def main() -> int:
         "--issue-file",
         default=None,
         help="path to a plain-text file containing the issue title + body (required with --repo)",
+    )
+    parser.add_argument(
+        "--create-pr",
+        action="store_true",
+        help="open a real GitHub pull request with the fix if the run is verified (--repo mode only). "
+        "Requires GITHUB_TOKEN in .env. Never triggers on an unresolved run.",
     )
 
     # --- fixture-issue mode (original) ---
@@ -598,9 +637,12 @@ def main() -> int:
             max_retries=max_retries,
             reset_memory=args.reset_memory,
             naive_baseline=args.naive_baseline,
+            create_pr=args.create_pr,
         )
 
     # --- Original fixture mode ---
+    if args.create_pr:
+        parser.error("--create-pr only applies to --repo mode (there's no real remote to open a PR against in fixture mode)")
     issue = ISSUES[args.issue]
     if args.naive_baseline and issue["naive_mock_builder"] is None:
         parser.error(f"--naive-baseline has no control script for issue {args.issue}")
