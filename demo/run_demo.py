@@ -903,8 +903,18 @@ def _create_pr_flow_interactive(repo_path: str, repo_url: str, issue_text: str, 
 
     import getpass
 
+    print()
+    print("=" * 70)
+    print("GitHub Token Required for Automated PR Creation:")
+    print("  1. Go to: https://github.com/settings/tokens")
+    print("  2. Click 'Generate new token' -> select 'Generate new token (classic)'")
+    print("  3. Give it a Note (e.g. 'Sutra Agent')")
+    print("  4. Under 'Select scopes', CHECK THE BOX FOR:")
+    print("     [x] repo  (Full control of private repositories)")
+    print("  5. Click 'Generate token' and copy the token (starts with 'ghp_')")
+    print("=" * 70)
     print("(input is hidden -- nothing will appear as you type, that's expected; paste/type then press Enter)")
-    token = getpass.getpass("GitHub personal access token (repo scope): ").strip()
+    token = getpass.getpass("GitHub Personal Access Token (classic, 'repo' scope): ").strip()
     if not token:
         print("No token entered -- cancelling PR creation.")
         return False

@@ -22,6 +22,18 @@ make run
 
 > **Evaluation Model Configuration:** `AI_API_KEY` is currently configured to target **`gemini/gemini-3.1-flash-lite`** (specified in [`harness/config.py`](harness/config.py) via `DEFAULT_AI_MODEL`). To evaluate with a different provider or model family, update `DEFAULT_AI_MODEL` in [`harness/config.py`](harness/config.py) in one line or export `AI_MODEL="<provider/model>"`.
 
+### GitHub Token Setup (for Automated Pull Requests)
+
+After fixing an issue, Sutra's interactive menu allows you to **Review Code** and **Create Pull Request**. To automatically fork the target repository, push a branch, and open a PR on GitHub, Sutra requires a **GitHub Personal Access Token (Classic)** with `repo` scope:
+
+1. Navigate to: [GitHub Settings > Personal Access Tokens (classic)](https://github.com/settings/tokens)
+2. Click **Generate new token** -> select **Generate new token (classic)**
+3. Give it a Note (e.g. `Sutra Agent`)
+4. Under **Select scopes**, **check the box for**:
+   - **`[x] repo`** *(Full control of private repositories and public repositories)*
+5. Click **Generate token** and copy the token (starts with `ghp_...`)
+6. Provide the token when prompted in the terminal (Option `2`), or set it in `.env` / environment via `export GITHUB_TOKEN="ghp_..."`.
+
 ---
 
 **Status: Phase 0 + Phase 1 + Phase 2 + Phase 3 + Phase 4 complete, plus a real token-context fix validated against a live, unscripted failure — all numbers below are measured from fixtures committed in this repo right now, regenerated after that fix, not carried over from an earlier run.**
