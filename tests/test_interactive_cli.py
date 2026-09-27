@@ -32,6 +32,81 @@ def test_detect_issue_text_strips_raw_text():
     assert result == "some pasted issue text"
 
 
+def test_parse_github_issue_ref_full_url():
+    ref = run_demo._parse_github_issue_ref("https://github.com/someorg/somerepo/issues/6", "")
+    assert ref == ("someorg", "somerepo", 6)
+
+
+def test_parse_github_issue_ref_bare_number_resolves_against_repo_url():
+    ref = run_demo._parse_github_issue_ref("6", "https://github.com/someorg/somerepo")
+    assert ref == ("someorg", "somerepo", 6)
+
+
+def test_parse_github_issue_ref_hash_number_resolves_against_repo_url():
+    ref = run_demo._parse_github_issue_ref("#6", "https://github.com/someorg/somerepo")
+    assert ref == ("someorg", "somerepo", 6)
+
+
+def test_parse_github_issue_ref_bare_number_without_repo_url_is_none():
+    assert run_demo._parse_github_issue_ref("6", "") is None
+
+
+def test_parse_github_issue_ref_plain_text_is_none():
+    assert run_demo._parse_github_issue_ref("the button is broken", "https://github.com/o/r") is None
+
+
+def test_detect_issue_text_fetches_full_url(monkeypatch):
+    monkeypatch.setattr(
+        run_demo, "_fetch_github_issue_text",
+        lambda owner, repo, number: f"fetched: {owner}/{repo}#{number}",
+    )
+    result = run_demo._detect_issue_text("https://github.com/someorg/somerepo/issues/6", "")
+    assert result == "fetched: someorg/somerepo#6"
+
+
+def test_detect_issue_text_fetches_bare_number_against_given_repo(monkeypatch):
+    monkeypatch.setattr(
+        run_demo, "_fetch_github_issue_text",
+        lambda owner, repo, number: f"fetched: {owner}/{repo}#{number}",
+    )
+    result = run_demo._detect_issue_text("6", "https://github.com/someorg/somerepo")
+    assert result == "fetched: someorg/somerepo#6"
+
+
+def test_fetch_github_issue_text_combines_title_and_body(monkeypatch):
+    import json
+    from io import BytesIO
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps({"title": "Search lost on back nav", "body": "Steps to reproduce..."}).encode()
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=15: FakeResponse())
+    result = run_demo._fetch_github_issue_text("someorg", "somerepo", 6)
+    assert result == "Search lost on back nav\n\nSteps to reproduce..."
+
+
+def test_fetch_github_issue_text_raises_clean_error_on_http_failure(monkeypatch):
+    import urllib.error
+
+    def raise_404(req, timeout=15):
+        raise urllib.error.HTTPError("url", 404, "Not Found", {}, None)
+
+    monkeypatch.setattr("urllib.request.urlopen", raise_404)
+    try:
+        run_demo._fetch_github_issue_text("someorg", "somerepo", 999)
+        assert False, "expected RuntimeError"
+    except RuntimeError as e:
+        assert "404" in str(e)
+        assert "999" in str(e)
+
+
 def _fake_result(verified=True, status="verified"):
     from types import SimpleNamespace
 

@@ -119,8 +119,10 @@ flowchart TD
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# Interactive mode -- no flags: asks for a repo, then an issue (paste text or a
-# file path, auto-detected), confirms once, then runs completely uninterrupted.
+# Interactive mode -- no flags: asks for a repo, then an issue -- paste the
+# text, a GitHub issue URL, a bare issue number (resolved against the repo
+# you just gave), or a file path, all auto-detected -- confirms once, then
+# runs completely uninterrupted.
 # When it finishes, a menu lets you review the real diff and optionally open a
 # PR (prompts for a token with getpass -- never echoed, never in shell history).
 python demo/run_demo.py

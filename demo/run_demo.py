@@ -629,12 +629,79 @@ def live_repo_run(
     return 0 if result.verified else 1
 
 
-def _detect_issue_text(raw: str) -> str:
-    """A file path if `raw` names an existing file, otherwise the raw text
-    itself -- no separate prompt asking which, per Part A."""
+def _parse_owner_repo_from_url(repo_url: str) -> tuple[str, str] | None:
+    from urllib.parse import urlparse
+
+    parsed = urlparse(repo_url if "://" in repo_url else f"https://{repo_url}")
+    parts = [p for p in parsed.path.split("/") if p]
+    if len(parts) < 2:
+        return None
+    return parts[0], parts[1].removesuffix(".git")
+
+
+def _parse_github_issue_ref(raw: str, repo_url: str) -> tuple[str, str, int] | None:
+    """A full GitHub issue URL, or a bare issue number/`#number` resolved
+    against `repo_url` (the repo already given earlier in setup). Returns
+    None if `raw` doesn't look like either -- callers fall through to
+    treating it as raw text."""
+    import re
+
+    m = re.match(r"^https?://github\.com/([^/]+)/([^/]+)/issues/(\d+)/?$", raw.strip())
+    if m:
+        return m.group(1), m.group(2).removesuffix(".git"), int(m.group(3))
+
+    m = re.match(r"^#?(\d+)$", raw.strip())
+    if m and repo_url:
+        owner_repo = _parse_owner_repo_from_url(repo_url)
+        if owner_repo:
+            return owner_repo[0], owner_repo[1], int(m.group(1))
+
+    return None
+
+
+def _fetch_github_issue_text(owner: str, repo: str, number: int) -> str:
+    """Fetches an issue's real title + body from the GitHub API -- public
+    issues need no token, but GITHUB_TOKEN (if set) is used when present for
+    a higher rate limit and for private repos."""
+    import json
+    import urllib.error
+    import urllib.request
+
+    url = f"https://api.github.com/repos/{owner}/{repo}/issues/{number}"
+    headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"could not fetch issue #{number} from {owner}/{repo}: {e.code} {e.reason}") from None
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"could not reach GitHub to fetch issue #{number}: {e.reason}") from None
+
+    title = (data.get("title") or "").strip()
+    body = (data.get("body") or "").strip()
+    return f"{title}\n\n{body}".strip()
+
+
+def _detect_issue_text(raw: str, repo_url: str = "") -> str:
+    """A file path if `raw` names an existing file; a real fetched issue if
+    `raw` is a GitHub issue URL or a bare issue number (resolved against
+    `repo_url`); otherwise the raw text itself -- no separate prompt asking
+    which, it's auto-detected."""
     if os.path.isfile(raw):
         with open(raw, encoding="utf-8") as f:
             return f.read().strip()
+
+    issue_ref = _parse_github_issue_ref(raw, repo_url)
+    if issue_ref:
+        owner, repo, number = issue_ref
+        print(f"Fetching issue #{number} from {owner}/{repo} ...")
+        return _fetch_github_issue_text(owner, repo, number)
+
     return raw.strip()
 
 
@@ -646,12 +713,17 @@ def _prompt_repo() -> str:
         print("  Please enter a repository URL or path.")
 
 
-def _prompt_issue() -> str:
+def _prompt_issue(repo_url: str) -> str:
     while True:
-        raw = input("What's the issue? (paste text, or a path to a file): ").strip()
-        if raw:
-            return _detect_issue_text(raw)
-        print("  Please enter issue text or a file path.")
+        raw = input("What's the issue? (paste text, a GitHub issue URL/number, or a path to a file): ").strip()
+        if not raw:
+            print("  Please enter issue text, a file path, or a GitHub issue URL/number.")
+            continue
+        try:
+            return _detect_issue_text(raw, repo_url)
+        except RuntimeError as e:
+            print(f"  {e}")
+            print("  Try again, or paste the issue text directly instead.")
 
 
 def _confirm_start(repo_url: str, issue_text: str) -> bool:
@@ -832,7 +904,7 @@ def interactive_run() -> int:
     to a final state, and only then does a post-run menu appear."""
     print("=== Sutra interactive setup ===")
     repo_url = _prompt_repo()
-    issue_text = _prompt_issue()
+    issue_text = _prompt_issue(repo_url)
     if not _confirm_start(repo_url, issue_text):
         return 0
 
