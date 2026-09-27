@@ -253,3 +253,51 @@ def test_create_pr_flow_returns_false_on_github_error(capsys):
         succeeded = run_demo._create_pr_flow_interactive("/repo", "https://github.com/x/y", "issue", "i1", result, trajectory=None)
     assert succeeded is False
     assert "bad credentials" in capsys.readouterr().out
+
+
+def test_prompt_issue_returns_known_issue_number_for_full_url(monkeypatch):
+    monkeypatch.setattr(
+        run_demo, "_fetch_github_issue_text",
+        lambda owner, repo, number: f"fetched: {owner}/{repo}#{number}",
+    )
+    with patch("builtins.input", return_value="https://github.com/someorg/somerepo/issues/6"):
+        issue_text, issue_number = run_demo._prompt_issue("")
+    assert issue_number == 6
+    assert issue_text == "fetched: someorg/somerepo#6"
+
+
+def test_prompt_issue_returns_known_issue_number_for_bare_number(monkeypatch):
+    monkeypatch.setattr(
+        run_demo, "_fetch_github_issue_text",
+        lambda owner, repo, number: f"fetched: {owner}/{repo}#{number}",
+    )
+    with patch("builtins.input", return_value="6"):
+        issue_text, issue_number = run_demo._prompt_issue("https://github.com/someorg/somerepo")
+    assert issue_number == 6
+
+
+def test_prompt_issue_returns_none_for_raw_text_or_file(tmp_path):
+    with patch("builtins.input", return_value="the button is broken"):
+        _, issue_number = run_demo._prompt_issue("")
+    assert issue_number is None
+
+    issue_file = tmp_path / "issue.txt"
+    issue_file.write_text("some issue text")
+    with patch("builtins.input", return_value=str(issue_file)):
+        _, issue_number = run_demo._prompt_issue("")
+    assert issue_number is None
+
+
+def test_interactive_issue_id_embeds_known_issue_number_for_extract_issue_number():
+    """The actual end-to-end point of this fix: an issue_id built from a
+    known issue number must be something github_pr.py's real
+    _extract_issue_number() picks up, so the PR body gets a real "Fixes #N"
+    line instead of silently omitting it."""
+    from harness.integrations.github_pr import _extract_issue_number
+
+    issue_number = 6
+    issue_id = f"issue-{issue_number}" if issue_number is not None else "interactive-abcd1234"
+    assert issue_id == "issue-6"
+    # Even with issue_text that (realistically) never repeats its own number:
+    fetched_body = "Search state is lost on back navigation\n\nSteps to reproduce: ..."
+    assert _extract_issue_number(fetched_body, issue_id) == 6

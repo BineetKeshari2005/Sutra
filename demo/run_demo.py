@@ -713,17 +713,28 @@ def _prompt_repo() -> str:
         print("  Please enter a repository URL or path.")
 
 
-def _prompt_issue(repo_url: str) -> str:
+def _prompt_issue(repo_url: str) -> tuple[str, int | None]:
+    """Returns (issue_text, issue_number). issue_number is known for certain
+    (not guessed later by regexing the fetched text) whenever the user gave
+    a GitHub issue URL or a bare number -- the caller uses it to build an
+    issue_id that _extract_issue_number() in github_pr.py will actually
+    match, so the PR body gets a real "Fixes #N" line instead of silently
+    omitting it because the fetched issue body doesn't happen to repeat its
+    own number."""
     while True:
         raw = input("What's the issue? (paste text, a GitHub issue URL/number, or a path to a file): ").strip()
         if not raw:
             print("  Please enter issue text, a file path, or a GitHub issue URL/number.")
             continue
         try:
-            return _detect_issue_text(raw, repo_url)
+            issue_text = _detect_issue_text(raw, repo_url)
         except RuntimeError as e:
             print(f"  {e}")
             print("  Try again, or paste the issue text directly instead.")
+            continue
+        issue_ref = _parse_github_issue_ref(raw, repo_url)
+        issue_number = issue_ref[2] if issue_ref else None
+        return issue_text, issue_number
 
 
 def _confirm_start(repo_url: str, issue_text: str) -> bool:
@@ -922,11 +933,15 @@ def interactive_run() -> int:
     to a final state, and only then does a post-run menu appear."""
     print("=== Sutra interactive setup ===")
     repo_url = _prompt_repo()
-    issue_text = _prompt_issue(repo_url)
+    issue_text, issue_number = _prompt_issue(repo_url)
     if not _confirm_start(repo_url, issue_text):
         return 0
 
-    issue_id = f"interactive-{uuid.uuid4().hex[:8]}"
+    # "issue-<n>" (not a random id) when the issue number is known for
+    # certain, so github_pr.py's _extract_issue_number() picks it up and the
+    # PR body gets a real "Fixes #<n>" line -- GitHub auto-links and
+    # auto-closes the issue when that PR merges.
+    issue_id = f"issue-{issue_number}" if issue_number is not None else f"interactive-{uuid.uuid4().hex[:8]}"
     result, repo_path, trajectory = _clone_and_run_interactive(repo_url, issue_text, issue_id)
     if result is None:
         return 1
