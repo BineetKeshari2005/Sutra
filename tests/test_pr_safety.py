@@ -4,6 +4,7 @@ network call, and the "proceeds" path mocks the GitHub API and git entirely.
 """
 from __future__ import annotations
 
+import subprocess
 from unittest.mock import patch
 
 from harness.integrations.github_pr import check_pr_authorization, create_pull_request
@@ -266,6 +267,116 @@ def test_create_pull_request_reuses_existing_fork_without_forking_again(tmp_path
 
     assert pr_url == "https://github.com/upstream-org/upstream-repo/pull/10"
     assert ("POST", "/repos/upstream-org/upstream-repo/forks") not in call_log
+
+
+def test_create_pull_request_second_call_reuses_existing_branch_instead_of_crashing(tmp_path):
+    """Reproduces the live bug: calling create_pull_request twice in the same
+    session (e.g. choosing "Create PR" again after it already succeeded)
+    computes the identical branch name both times (issue_id + short_sha don't
+    change), and `git checkout -b` used to crash on the second call because
+    that branch already existed. Runs REAL git (checkout/rev-parse) against a
+    real repo so the second call's branch-exists check is genuine; only the
+    network-touching git commands (remote/push) and the GitHub API are faked.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    (repo / "a.py").write_text("x = 1\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)
+    repo_path = str(repo)
+
+    def real_git_fake_network(rp, args, token):
+        from types import SimpleNamespace
+
+        if args and args[0] in ("remote", "push"):
+            return SimpleNamespace(stdout="", stderr="", returncode=0)
+        proc = subprocess.run(["git", *args], cwd=rp, capture_output=True, text=True)
+        if proc.returncode != 0:
+            from harness.integrations.github_pr import GitHubPRError
+
+            raise GitHubPRError(f"git {' '.join(args)} failed: {proc.stderr.strip()}")
+        return proc
+
+    api_responses = {
+        ("GET", "/repos/someorg/somerepo"): {"default_branch": "main", "permissions": {"push": True}},
+        ("GET", "/user"): {"login": "someorg"},
+    }
+    pr_counter = {"n": 0}
+
+    def fake_api(method, path, token, data=None):
+        if method == "POST" and path == "/repos/someorg/somerepo/pulls":
+            pr_counter["n"] += 1
+            return {"html_url": f"https://github.com/someorg/somerepo/pull/{pr_counter['n']}"}
+        if (method, path) in api_responses:
+            return api_responses[(method, path)]
+        raise AssertionError(f"unexpected API call: {method} {path}")
+
+    trajectory = TrajectoryStore(str(tmp_path / "t.jsonl"))
+    with patch("harness.integrations.github_pr._api_request", side_effect=fake_api), \
+         patch("harness.integrations.github_pr._run_git", side_effect=real_git_fake_network):
+        url1 = create_pull_request(
+            repo_path=repo_path, repo_url="https://github.com/someorg/somerepo",
+            issue_text="issue", issue_id="i1", result=_make_result(), github_token="tok",
+            interactive=True, trajectory=trajectory,
+        )
+        # This second call is what crashed before the fix: same issue_id, same
+        # HEAD commit -> identical branch name -> `git checkout -b` used to
+        # fail here for real.
+        url2 = create_pull_request(
+            repo_path=repo_path, repo_url="https://github.com/someorg/somerepo",
+            issue_text="issue", issue_id="i1", result=_make_result(), github_token="tok",
+            interactive=True, trajectory=trajectory,
+        )
+
+    assert url1 == "https://github.com/someorg/somerepo/pull/1"
+    assert url2 == "https://github.com/someorg/somerepo/pull/2"
+
+
+def test_create_pull_request_returns_existing_pr_url_when_github_reports_duplicate(tmp_path):
+    """The GitHub-API-side half of the same idempotency fix: if GitHub itself
+    refuses a second PR for the same head/base (422 "already exists"), look
+    the existing one up and return its URL instead of raising."""
+    from harness.integrations.github_pr import GitHubPRError
+
+    api_responses = {
+        ("GET", "/repos/someorg/somerepo"): {"default_branch": "main", "permissions": {"push": True}},
+        ("GET", "/user"): {"login": "someorg"},
+    }
+
+    def fake_api(method, path, token, data=None):
+        if method == "POST" and path == "/repos/someorg/somerepo/pulls":
+            raise GitHubPRError(
+                "GitHub API POST /repos/someorg/somerepo/pulls failed: 422 Unprocessable Entity -- "
+                '{"message":"Validation Failed","errors":[{"message":"A pull request already exists '
+                'for someorg:fix/i1-abc1234."}]}'
+            )
+        if path.startswith("/repos/someorg/somerepo/pulls?head="):
+            return [{"html_url": "https://github.com/someorg/somerepo/pull/5"}]
+        if (method, path) in api_responses:
+            return api_responses[(method, path)]
+        raise AssertionError(f"unexpected API call: {method} {path}")
+
+    def fake_git(repo_path, args, token):
+        from types import SimpleNamespace
+        if args[:2] == ["rev-parse", "--short"]:
+            return SimpleNamespace(stdout="abc1234\n")
+        return SimpleNamespace(stdout="")
+
+    trajectory = TrajectoryStore(str(tmp_path / "t.jsonl"))
+    with patch("harness.integrations.github_pr._api_request", side_effect=fake_api), \
+         patch("harness.integrations.github_pr._run_git", side_effect=fake_git), \
+         patch("harness.integrations.github_pr._branch_exists_locally", return_value=False), \
+         patch("subprocess.run"):
+        url = create_pull_request(
+            repo_path=str(tmp_path), repo_url="https://github.com/someorg/somerepo",
+            issue_text="issue", issue_id="i1", result=_make_result(), github_token="tok",
+            interactive=True, trajectory=trajectory,
+        )
+
+    assert url == "https://github.com/someorg/somerepo/pull/5"
 
 
 def test_create_pull_request_proceeds_only_when_allowlisted_and_confirmed(tmp_path):

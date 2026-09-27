@@ -72,6 +72,13 @@ def _run_git(repo_path: str, args: list[str], token: str) -> subprocess.Complete
     return proc
 
 
+def _branch_exists_locally(repo_path: str, branch_name: str) -> bool:
+    proc = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", branch_name], cwd=repo_path, capture_output=True, text=True
+    )
+    return proc.returncode == 0
+
+
 def _parse_owner_repo(repo_url: str) -> tuple[str, str]:
     parsed = urlparse(repo_url if "://" in repo_url else f"https://{repo_url}")
     parts = [p for p in parsed.path.split("/") if p]
@@ -263,7 +270,14 @@ def create_pull_request(
     short_sha = _run_git(repo_path, ["rev-parse", "--short", "HEAD"], github_token).stdout.strip()
     branch_name = f"fix/{issue_id}-{short_sha}"
 
-    _run_git(repo_path, ["checkout", "-b", branch_name], github_token)
+    # issue_id + short_sha don't change across repeat calls in the same
+    # session (e.g. choosing "Create PR" a second time after it already
+    # succeeded once), so branch_name is identical every time -- reuse the
+    # branch instead of crashing on "-b" when it already exists locally.
+    if _branch_exists_locally(repo_path, branch_name):
+        _run_git(repo_path, ["checkout", branch_name], github_token)
+    else:
+        _run_git(repo_path, ["checkout", "-b", branch_name], github_token)
     push_url = f"https://x-access-token:{github_token}@github.com/{push_owner}/{push_repo}.git"
     _run_git(repo_path, ["remote", "add", "sutra-pr-push", push_url], github_token)
     try:
@@ -278,15 +292,29 @@ def create_pull_request(
     title = f"Fix: {issue_text.strip().splitlines()[0][:72]}" if issue_text.strip() else f"Fix for {issue_id}"
     body = _compose_pr_body(issue_text, issue_number, result)
 
-    pr = _api_request(
-        "POST",
-        f"/repos/{owner}/{repo}/pulls",
-        github_token,
-        data={
-            "title": title,
-            "body": body,
-            "head": f"{push_owner}:{branch_name}",
-            "base": default_branch,
-        },
-    )
-    return pr["html_url"]
+    try:
+        pr = _api_request(
+            "POST",
+            f"/repos/{owner}/{repo}/pulls",
+            github_token,
+            data={
+                "title": title,
+                "body": body,
+                "head": f"{push_owner}:{branch_name}",
+                "base": default_branch,
+            },
+        )
+        return pr["html_url"]
+    except GitHubPRError as e:
+        # Same repeat-call scenario as the branch reuse above: GitHub itself
+        # refuses a second PR for the same head/base with a 422. Look the
+        # existing one up and return it instead of erroring on a call that,
+        # from the user's perspective, already succeeded once.
+        if "already exists" not in str(e).lower():
+            raise
+        existing = _api_request(
+            "GET", f"/repos/{owner}/{repo}/pulls?head={push_owner}:{branch_name}&state=all", github_token
+        )
+        if existing:
+            return existing[0]["html_url"]
+        raise
