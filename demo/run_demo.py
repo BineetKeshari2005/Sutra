@@ -466,10 +466,43 @@ def _detect_live_adapter() -> Any:
     for env_var, model, label in _LIVE_ADAPTER_CANDIDATES:
         if os.environ.get(env_var):
             print(f"Using {label} ({model})")
+            if label == "Groq":
+                print(
+                    "  WARNING: this model's tool-calling is unreliable in practice -- it has been "
+                    "observed emitting a malformed tool call as plain text instead of a real function "
+                    "call, which the provider then rejects outright. Gemini/OpenAI/DeepSeek are more "
+                    "consistent for a tool-calling-heavy agent like this one."
+                )
             return LiteLLMAdapter(model=model, api_key_env=env_var)
 
     print("No API key found — running in MockAdapter (offline demo) mode")
     return None
+
+
+def _run_orchestrator_safely(orchestrator: Any) -> Any:
+    """Wraps orchestrator.run() so a live model/provider failure (rate limit,
+    malformed tool call, no balance, network error, ...) ends with one clean
+    message instead of a raw traceback killing the whole session. Returns
+    None on failure -- callers treat that the same as any other setup
+    failure they already handle. This is deliberately broad (any Exception,
+    not a specific litellm type) since a live provider's failure modes
+    aren't fully enumerable and the goal is "never crash ugly", not "handle
+    this one specific error"."""
+    try:
+        return orchestrator.run()
+    except Exception as e:
+        print()
+        print("=" * 70)
+        print(f"ERROR: the model provider failed mid-run ({type(e).__name__}) -- stopping cleanly.")
+        print(f"  {str(e)[:400]}")
+        print("=" * 70)
+        print(
+            "This is almost always the provider's fault, not Sutra's -- a malformed tool call, a rate "
+            "limit, or an account with no balance are the common causes. Gemini/OpenAI/DeepSeek tend to "
+            "be more reliable for tool-calling than Groq's current model. Try again, or switch the API "
+            "key in .env to a different provider."
+        )
+        return None
 
 
 def live_repo_run(
@@ -579,7 +612,9 @@ def live_repo_run(
         naive_baseline=naive_baseline,
         max_retries=max_retries,
     )
-    result = orchestrator.run()
+    result = _run_orchestrator_safely(orchestrator)
+    if result is None:
+        return 1
 
     print()
     print("=" * 70)
@@ -807,7 +842,9 @@ def _clone_and_run_interactive(
     print("Running -- Understand -> Localize -> Plan -> Act -> Verify -> Finalize, uninterrupted...")
     print()
     orchestrator = Orchestrator(adapter, config, trajectory, max_retries=MAX_REFLECT_RETRIES)
-    result = orchestrator.run()
+    result = _run_orchestrator_safely(orchestrator)
+    if result is None:
+        return None, None, None
     return result, repo_path, trajectory
 
 
@@ -1073,7 +1110,9 @@ def main() -> int:
         adapter, config, trajectory, naive_baseline=args.naive_baseline,
         max_retries=max_retries if max_retries is not None else MAX_REFLECT_RETRIES,
     )
-    result = orchestrator.run()
+    result = _run_orchestrator_safely(orchestrator)
+    if result is None:
+        return 1
 
     print()
     print("=" * 70)

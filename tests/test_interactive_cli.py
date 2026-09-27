@@ -301,3 +301,36 @@ def test_interactive_issue_id_embeds_known_issue_number_for_extract_issue_number
     # Even with issue_text that (realistically) never repeats its own number:
     fetched_body = "Search state is lost on back navigation\n\nSteps to reproduce: ..."
     assert _extract_issue_number(fetched_body, issue_id) == 6
+
+
+def test_run_orchestrator_safely_returns_result_on_success():
+    class FakeOrchestrator:
+        def run(self):
+            return "the real result"
+
+    assert run_demo._run_orchestrator_safely(FakeOrchestrator()) == "the real result"
+
+
+def test_run_orchestrator_safely_catches_provider_failure_and_returns_none(capsys):
+    class FakeOrchestrator:
+        def run(self):
+            raise RuntimeError("GroqException - tool_use_failed: malformed tool call")
+
+    result = run_demo._run_orchestrator_safely(FakeOrchestrator())
+    assert result is None
+    out = capsys.readouterr().out
+    assert "ERROR: the model provider failed mid-run" in out
+    assert "tool_use_failed" in out
+    assert "provider's fault, not Sutra's" in out
+
+
+def test_groq_selection_prints_reliability_warning(monkeypatch, capsys):
+    for env_var, _, _ in run_demo._LIVE_ADAPTER_CANDIDATES:
+        monkeypatch.delenv(env_var, raising=False)
+    monkeypatch.setenv("GROQ_API_KEY", "dummy")
+
+    run_demo._detect_live_adapter()
+
+    out = capsys.readouterr().out
+    assert "WARNING" in out
+    assert "unreliable" in out
