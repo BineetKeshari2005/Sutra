@@ -182,12 +182,21 @@ def prepare_battery_sandbox(target_info: dict[str, Any]) -> tuple[str, str]:
     base_commit = target_info.get("base_commit", "HEAD")
     test_commit = target_info.get("test_commit")
 
-    # Clone locally
-    subprocess.run(["git", "clone", "--quiet", repo_source, temp_dir], check=True)
+    has_git = os.path.isdir(os.path.join(repo_source, ".git"))
+    if has_git:
+        subprocess.run(["git", "clone", "--quiet", repo_source, temp_dir], check=True)
+    else:
+        shutil.copytree(repo_source, temp_dir, dirs_exist_ok=True)
+        subprocess.run(["git", "init", "--quiet"], cwd=temp_dir, check=True)
+        subprocess.run(["git", "config", "user.email", "agent@harness.local"], cwd=temp_dir, check=True)
+        subprocess.run(["git", "config", "user.name", "SWE Agent Harness"], cwd=temp_dir, check=True)
+        subprocess.run(["git", "add", "."], cwd=temp_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "initial commit", "--quiet"], cwd=temp_dir, check=True)
+
     subprocess.run(["git", "config", "user.email", "agent@harness.local"], cwd=temp_dir, check=True)
     subprocess.run(["git", "config", "user.name", "SWE Agent Harness"], cwd=temp_dir, check=True)
 
-    if base_commit and base_commit != "HEAD":
+    if has_git and base_commit and base_commit != "HEAD":
         subprocess.run(["git", "checkout", "--quiet", base_commit], cwd=temp_dir, check=True)
 
     if test_commit:
