@@ -829,10 +829,14 @@ def _show_diff_and_confidence(result: Any) -> None:
         print(f"unresolved_issue: {cr.get('unresolved_issue')}")
 
 
-def _create_pr_flow_interactive(repo_path: str, repo_url: str, issue_text: str, issue_id: str, result: Any, trajectory: TrajectoryStore) -> None:
+def _create_pr_flow_interactive(repo_path: str, repo_url: str, issue_text: str, issue_id: str, result: Any, trajectory: TrajectoryStore) -> bool:
+    """Returns True once a PR is actually opened, so the caller can end the
+    session cleanly on success instead of looping back to the full menu --
+    False on cancellation/failure, so the caller keeps offering the menu to
+    retry or end."""
     if not result.verified:
         print(f"Cannot create a PR: run status is '{result.status}', not verified.")
-        return
+        return False
 
     import getpass
 
@@ -840,7 +844,7 @@ def _create_pr_flow_interactive(repo_path: str, repo_url: str, issue_text: str, 
     token = getpass.getpass("GitHub personal access token (repo scope): ").strip()
     if not token:
         print("No token entered -- cancelling PR creation.")
-        return
+        return False
     print(f"Token received ({len(token)} characters). Not shown, for your safety.")
 
     from harness.integrations.github_pr import GitHubPRError, create_pull_request
@@ -857,9 +861,15 @@ def _create_pr_flow_interactive(repo_path: str, repo_url: str, issue_text: str, 
             interactive=True,
             trajectory=trajectory,
         )
-        print(f"PR opened: {pr_url}")
+        print()
+        print("=" * 70)
+        print("PR opened successfully!")
+        print(pr_url)
+        print("=" * 70)
+        return True
     except GitHubPRError as e:
         print(f"ERROR: PR creation failed: {e}")
+        return False
 
 
 def _review_submenu() -> str:
@@ -887,12 +897,18 @@ def _post_run_menu(repo_path: str, repo_url: str, issue_text: str, issue_id: str
         if choice == "1":
             _show_diff_and_confidence(result)
             if _review_submenu() == "pr":
-                _create_pr_flow_interactive(repo_path, repo_url, issue_text, issue_id, result, trajectory)
+                if _create_pr_flow_interactive(repo_path, repo_url, issue_text, issue_id, result, trajectory):
+                    print("Goodbye.")
+                    return 0
+                # PR creation failed/cancelled -- fall through to the
+                # top-level menu again so the user can retry or end.
             else:
                 print("Goodbye.")
                 return 0
         elif choice == "2":
-            _create_pr_flow_interactive(repo_path, repo_url, issue_text, issue_id, result, trajectory)
+            if _create_pr_flow_interactive(repo_path, repo_url, issue_text, issue_id, result, trajectory):
+                print("Goodbye.")
+                return 0
         elif choice == "3":
             print("Ending. No PR created.")
             return 0

@@ -135,23 +135,47 @@ def test_post_run_menu_review_then_end_never_touches_pr(tmp_path):
     mock_pr.assert_not_called()
 
 
-def test_post_run_menu_review_then_create_pr(tmp_path):
-    # After "Review code" -> "Create PR", the flow loops back to the
-    # top-level menu (it's not a terminal action), so a final choice is
-    # still needed to end the session.
+def test_post_run_menu_review_then_create_pr_succeeds_and_ends_immediately(tmp_path):
+    # A successful PR creation is a terminal action: no repeated "what would
+    # you like to do?" menu afterward, just a clean end.
     result = _fake_result()
-    with patch("builtins.input", side_effect=["1", "1", "3"]), \
-         patch("run_demo._create_pr_flow_interactive") as mock_pr:
+    with patch("builtins.input", side_effect=["1", "1"]), \
+         patch("run_demo._create_pr_flow_interactive", return_value=True) as mock_pr:
         exit_code = run_demo._post_run_menu(str(tmp_path), "https://github.com/x/y", "issue text", "i1", result, trajectory=None)
 
     assert exit_code == 0
     mock_pr.assert_called_once()
 
 
-def test_post_run_menu_create_pr_directly_from_top_level(tmp_path):
+def test_post_run_menu_review_then_create_pr_fails_and_loops_back(tmp_path):
+    # A failed/cancelled PR attempt is NOT terminal -- the menu comes back so
+    # the user can retry or end.
+    result = _fake_result()
+    with patch("builtins.input", side_effect=["1", "1", "3"]), \
+         patch("run_demo._create_pr_flow_interactive", return_value=False) as mock_pr:
+        exit_code = run_demo._post_run_menu(str(tmp_path), "https://github.com/x/y", "issue text", "i1", result, trajectory=None)
+
+    assert exit_code == 0
+    mock_pr.assert_called_once()
+
+
+def test_post_run_menu_create_pr_directly_succeeds_and_ends_immediately(tmp_path):
+    result = _fake_result()
+    with patch("builtins.input", side_effect=["2"]), \
+         patch("run_demo._create_pr_flow_interactive", return_value=True) as mock_pr:
+        exit_code = run_demo._post_run_menu(str(tmp_path), "https://github.com/x/y", "issue text", "i1", result, trajectory=None)
+
+    assert exit_code == 0
+    mock_pr.assert_called_once()
+
+
+def test_post_run_menu_create_pr_directly_fails_and_loops_back(tmp_path):
+    # Reproduces the reported UX bug: previously, even a SUCCESSFUL PR
+    # creation looped back to the full menu repeatedly. A failed one should
+    # still loop back (so the user can retry), which this covers.
     result = _fake_result()
     with patch("builtins.input", side_effect=["2", "3"]), \
-         patch("run_demo._create_pr_flow_interactive") as mock_pr:
+         patch("run_demo._create_pr_flow_interactive", return_value=False) as mock_pr:
         exit_code = run_demo._post_run_menu(str(tmp_path), "https://github.com/x/y", "issue text", "i1", result, trajectory=None)
 
     assert exit_code == 0
@@ -178,8 +202,9 @@ def test_post_run_menu_reprompts_on_invalid_choice(tmp_path):
 def test_create_pr_flow_refuses_when_not_verified(capsys):
     result = _fake_result(verified=False, status="unresolved")
     with patch("getpass.getpass") as mock_getpass:
-        run_demo._create_pr_flow_interactive("/repo", "https://github.com/x/y", "issue", "i1", result, trajectory=None)
+        succeeded = run_demo._create_pr_flow_interactive("/repo", "https://github.com/x/y", "issue", "i1", result, trajectory=None)
     mock_getpass.assert_not_called()
+    assert succeeded is False
     assert "not verified" in capsys.readouterr().out
 
 
@@ -203,5 +228,28 @@ def test_show_diff_and_confidence_omits_confidence_report_when_verified(capsys):
 def test_create_pr_flow_cancels_on_empty_token(capsys):
     result = _fake_result(verified=True)
     with patch("getpass.getpass", return_value=""):
-        run_demo._create_pr_flow_interactive("/repo", "https://github.com/x/y", "issue", "i1", result, trajectory=None)
+        succeeded = run_demo._create_pr_flow_interactive("/repo", "https://github.com/x/y", "issue", "i1", result, trajectory=None)
+    assert succeeded is False
     assert "No token entered" in capsys.readouterr().out
+
+
+def test_create_pr_flow_returns_true_on_success(capsys):
+    result = _fake_result(verified=True)
+    with patch("getpass.getpass", return_value="ghp_faketoken"), \
+         patch("harness.integrations.github_pr.create_pull_request", return_value="https://github.com/x/y/pull/1"):
+        succeeded = run_demo._create_pr_flow_interactive("/repo", "https://github.com/x/y", "issue", "i1", result, trajectory=None)
+    assert succeeded is True
+    out = capsys.readouterr().out
+    assert "PR opened successfully" in out
+    assert "https://github.com/x/y/pull/1" in out
+
+
+def test_create_pr_flow_returns_false_on_github_error(capsys):
+    from harness.integrations.github_pr import GitHubPRError
+
+    result = _fake_result(verified=True)
+    with patch("getpass.getpass", return_value="ghp_faketoken"), \
+         patch("harness.integrations.github_pr.create_pull_request", side_effect=GitHubPRError("bad credentials")):
+        succeeded = run_demo._create_pr_flow_interactive("/repo", "https://github.com/x/y", "issue", "i1", result, trajectory=None)
+    assert succeeded is False
+    assert "bad credentials" in capsys.readouterr().out
