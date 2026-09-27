@@ -25,6 +25,7 @@ import os
 import subprocess
 import sys
 import uuid
+from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -436,21 +437,58 @@ ISSUES = {
 }
 
 
+# Checked in this order -- first match wins. Gemini/DeepSeek/Qwen/OpenAI/Groq
+# model strings verified directly against LiteLLM's own provider docs, not
+# guessed: https://docs.litellm.ai/docs/providers/deepseek and
+# https://docs.litellm.ai/docs/providers/dashscope (Qwen). LiteLLMAdapter now
+# passes the key explicitly (harness/model_adapter/litellm_adapter.py), so
+# each of these can use whatever env var name it lists here regardless of
+# what litellm's own per-provider convention would otherwise expect (e.g.
+# DashScope normally wants DASHSCOPE_API_KEY, not QWEN_API_KEY).
+_LIVE_ADAPTER_CANDIDATES = [
+    ("GEMINI_API_KEY", "gemini/gemini-3.1-flash-lite", "Gemini"),
+    ("DEEPSEEK_API_KEY", "deepseek/deepseek-chat", "DeepSeek"),
+    ("QWEN_API_KEY", "dashscope/qwen-turbo", "Qwen"),
+    ("OPENAI_API_KEY", "gpt-4o-mini", "OpenAI"),
+    ("GROQ_API_KEY", "groq/qwen/qwen3.8-27b", "Groq"),
+]
+
+
+def _detect_live_adapter() -> Any:
+    """Returns a configured LiteLLMAdapter for the first supported API key
+    found in the environment, or None if none are set (callers decide what
+    "none found" means for them -- MockAdapter fallback in fixture mode,
+    a hard error in live/interactive mode, since those have no fixture
+    script to fall back to). Always prints exactly one line naming what
+    it picked."""
+    from harness.model_adapter.litellm_adapter import LiteLLMAdapter
+
+    for env_var, model, label in _LIVE_ADAPTER_CANDIDATES:
+        if os.environ.get(env_var):
+            print(f"Using {label} ({model})")
+            return LiteLLMAdapter(model=model, api_key_env=env_var)
+
+    print("No API key found — running in MockAdapter (offline demo) mode")
+    return None
+
+
 def live_repo_run(
     repo_url: str, issue_file: str, max_retries: int, reset_memory: bool,
     naive_baseline: bool = False, create_pr: bool = False,
     allow_pr_target: str | None = None, confirm_pr: bool = False,
 ) -> int:
     """Run the orchestrator against an arbitrary GitHub repo + plain-text issue file.
-    Prefers OPENAI_API_KEY (gpt-4o-mini), falls back to GROQ_API_KEY if set.
+    Auto-detects the first available API key (see _LIVE_ADAPTER_CANDIDATES).
     No cherry-pick: clones HEAD directly.
     Test gates are skipped (target_test=None) since we don't know the test runner.
     """
-    openai_key = os.environ.get("OPENAI_API_KEY")
-    groq_key = os.environ.get("GROQ_API_KEY")
-    gemini_key = os.environ.get("GEMINI_API_KEY")
-    if not gemini_key and not openai_key and not groq_key:
-        print("[live] ERROR: set GEMINI_API_KEY, OPENAI_API_KEY, or GROQ_API_KEY in .env")
+    has_any_key = any(os.environ.get(env_var) for env_var, _, _ in _LIVE_ADAPTER_CANDIDATES)
+    if not has_any_key:
+        print(
+            "[live] ERROR: set one of "
+            + ", ".join(env_var for env_var, _, _ in _LIVE_ADAPTER_CANDIDATES)
+            + " in .env"
+        )
         return 1
 
     github_token = os.environ.get("GITHUB_TOKEN")
@@ -514,16 +552,8 @@ def live_repo_run(
             os.remove(memory_path)
             print(f"[live] wiped repo memory at {memory_path}")
 
-    from harness.model_adapter.litellm_adapter import LiteLLMAdapter
-    if gemini_key:
-        print("[live] using LiteLLMAdapter(gemini/gemini-3.1-flash-lite) -- FREE tier")
-        adapter = LiteLLMAdapter(model="gemini/gemini-3.1-flash-lite", api_key_env="GEMINI_API_KEY")
-    elif openai_key:
-        print("[live] using LiteLLMAdapter(gpt-4o-mini via OpenAI)")
-        adapter = LiteLLMAdapter(model="gpt-4o-mini", api_key_env="OPENAI_API_KEY")
-    else:
-        print("[live] using LiteLLMAdapter(groq/qwen/qwen3.8-27b) -- WARNING: tool calling may be unreliable")
-        adapter = LiteLLMAdapter(model="groq/qwen/qwen3.8-27b", api_key_env="GROQ_API_KEY")
+    adapter = _detect_live_adapter()
+    # has_any_key was already checked above, so this should never be None here.
 
     demo_dir = os.path.dirname(os.path.abspath(__file__))
     trajectory_path = os.path.join(demo_dir, "trajectory.jsonl")
@@ -648,11 +678,9 @@ def _clone_and_run_interactive(
     (Part A's explicit requirement) no matter what this one needs to return
     or how its control flow evolves.
     """
-    openai_key = os.environ.get("OPENAI_API_KEY")
-    groq_key = os.environ.get("GROQ_API_KEY")
-    gemini_key = os.environ.get("GEMINI_API_KEY")
-    if not gemini_key and not openai_key and not groq_key:
-        print("ERROR: set GEMINI_API_KEY, OPENAI_API_KEY, or GROQ_API_KEY in .env")
+    has_any_key = any(os.environ.get(env_var) for env_var, _, _ in _LIVE_ADAPTER_CANDIDATES)
+    if not has_any_key:
+        print("ERROR: set one of " + ", ".join(env_var for env_var, _, _ in _LIVE_ADAPTER_CANDIDATES) + " in .env")
         return None, None, None
 
     print(f"Cloning {repo_url} ...")
@@ -675,17 +703,7 @@ def _clone_and_run_interactive(
     ).stdout.strip()
     print(f"Cloned OK. HEAD = {base_commit[:12]}  repo at {repo_path}")
 
-    from harness.model_adapter.litellm_adapter import LiteLLMAdapter
-
-    if gemini_key:
-        print("Using gemini/gemini-3.1-flash-lite (free tier)")
-        adapter = LiteLLMAdapter(model="gemini/gemini-3.1-flash-lite", api_key_env="GEMINI_API_KEY")
-    elif openai_key:
-        print("Using gpt-4o-mini via OpenAI")
-        adapter = LiteLLMAdapter(model="gpt-4o-mini", api_key_env="OPENAI_API_KEY")
-    else:
-        print("Using groq/qwen/qwen3.8-27b -- tool calling may be unreliable")
-        adapter = LiteLLMAdapter(model="groq/qwen/qwen3.8-27b", api_key_env="GROQ_API_KEY")
+    adapter = _detect_live_adapter()
 
     demo_dir = os.path.dirname(os.path.abspath(__file__))
     trajectory_path = os.path.join(demo_dir, "trajectory.jsonl")
@@ -922,29 +940,14 @@ def main() -> int:
             os.remove(memory_path)
             print(f"[demo] wiped repo memory at {memory_path}")
 
-    openai_key = os.environ.get("OPENAI_API_KEY")
-    groq_key = os.environ.get("GROQ_API_KEY")
-    gemini_key = os.environ.get("GEMINI_API_KEY")
-    if gemini_key:
-        from harness.model_adapter.litellm_adapter import LiteLLMAdapter
-        print("[demo] GEMINI_API_KEY found -- using live LiteLLMAdapter(gemini/gemini-3.1-flash-lite)")
-        adapter = LiteLLMAdapter(model="gemini/gemini-3.1-flash-lite", api_key_env="GEMINI_API_KEY")
-    elif openai_key:
-        from harness.model_adapter.litellm_adapter import LiteLLMAdapter
-
-        print("[demo] OPENAI_API_KEY found -- using live LiteLLMAdapter(gpt-4o-mini)")
-        adapter = LiteLLMAdapter(model="gpt-4o-mini", api_key_env="OPENAI_API_KEY")
-    elif groq_key:
-        from harness.model_adapter.litellm_adapter import LiteLLMAdapter
-
-        print("[demo] GROQ_API_KEY found -- using live LiteLLMAdapter(groq/qwen/qwen3.8-27b)")
-        adapter = LiteLLMAdapter(model="groq/qwen/qwen3.8-27b", api_key_env="GROQ_API_KEY")
-    elif args.naive_baseline:
-        print("[demo] no live key set -- using scripted MockAdapter (naive-baseline control script)")
-        adapter = issue["naive_mock_builder"](repo_path)
-    else:
-        print("[demo] no live key set -- using scripted MockAdapter (deterministic replay)")
-        adapter = issue["mock_builder"](repo_path)
+    adapter = _detect_live_adapter()
+    if adapter is None:
+        if args.naive_baseline:
+            print("[demo] using scripted MockAdapter (naive-baseline control script)")
+            adapter = issue["naive_mock_builder"](repo_path)
+        else:
+            print("[demo] using scripted MockAdapter (deterministic replay)")
+            adapter = issue["mock_builder"](repo_path)
 
     demo_dir = os.path.dirname(os.path.abspath(__file__))
     trajectory_path = os.path.join(demo_dir, "trajectory.jsonl")

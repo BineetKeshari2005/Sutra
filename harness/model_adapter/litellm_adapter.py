@@ -35,6 +35,7 @@ class LiteLLMAdapter:
     def __init__(self, model: str, api_key_env: str | None = None):
         _load_dotenv_once()
         self.model = model
+        self.api_key_env = api_key_env
         if api_key_env and not os.environ.get(api_key_env):
             raise RuntimeError(
                 f"LiteLLMAdapter requires {api_key_env} to be set (env var or .env file) "
@@ -58,6 +59,12 @@ class LiteLLMAdapter:
             temperature=temperature,
             max_tokens=max_tokens,
         )
+        # Pass the key explicitly rather than relying on litellm's own
+        # per-provider env-var convention (e.g. it expects DASHSCOPE_API_KEY
+        # for a "dashscope/" model, not a custom name like QWEN_API_KEY) --
+        # this way whatever env var api_key_env names always works.
+        if self.api_key_env:
+            kwargs["api_key"] = os.environ.get(self.api_key_env)
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
