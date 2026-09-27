@@ -836,10 +836,12 @@ def _create_pr_flow_interactive(repo_path: str, repo_url: str, issue_text: str, 
 
     import getpass
 
+    print("(input is hidden -- nothing will appear as you type, that's expected; paste/type then press Enter)")
     token = getpass.getpass("GitHub personal access token (repo scope): ").strip()
     if not token:
         print("No token entered -- cancelling PR creation.")
         return
+    print(f"Token received ({len(token)} characters). Not shown, for your safety.")
 
     from harness.integrations.github_pr import GitHubPRError, create_pull_request
 
