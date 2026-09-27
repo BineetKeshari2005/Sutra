@@ -26,6 +26,15 @@ def _resolve(repo_path: str, path: str) -> str | None:
     return full
 
 
+def _is_binary(file_path: str) -> bool:
+    try:
+        with open(file_path, "rb") as bf:
+            chunk = bf.read(1024)
+            return b"\x00" in chunk
+    except Exception:
+        return False
+
+
 def open_file(
     repo_path: str, path: str, start_line: int | None = None, end_line: int | None = None
 ) -> dict[str, Any]:
@@ -34,6 +43,12 @@ def open_file(
         return {"ok": False, "error": "path escapes the repository sandbox", "hint": "use a path relative to the repo root"}
     if not os.path.isfile(full):
         return {"ok": False, "error": f"file not found: {path}", "hint": "use search_code to locate the correct file path"}
+    if _is_binary(full):
+        return {
+            "ok": False,
+            "error": f"binary file detected: {path}",
+            "hint": "open_file only supports text files; binary files cannot be processed",
+        }
 
     with open(full, encoding="utf-8", errors="ignore") as f:
         lines = f.readlines()
@@ -94,6 +109,12 @@ def edit_file(repo_path: str, path: str, old_str: str, new_str: str) -> dict[str
         return {"ok": False, "error": "path escapes the repository sandbox", "hint": "use a path relative to the repo root"}
     if not os.path.isfile(full):
         return {"ok": False, "error": f"file not found: {path}", "hint": "use search_code to locate the correct file path"}
+    if _is_binary(full):
+        return {
+            "ok": False,
+            "error": f"binary file detected: {path}",
+            "hint": "edit_file only supports text files; binary files cannot be edited",
+        }
 
     with open(full, encoding="utf-8", errors="ignore") as f:
         content = f.read()

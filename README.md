@@ -6,6 +6,24 @@ Sutra doesn't just patch a bug and exit. Given a repo and an issue, it clones th
 
 > *"Sutra" — a thread that runs through and holds things together. Every decision the agent makes, every failure it recovers from, and everything it learns about a repo is strung on that thread and carried into the next issue.*
 
+---
+
+## Evaluation / Quickstart
+
+To run Sutra following the official hackathon evaluation protocol:
+
+```bash
+git clone https://github.com/BineetKeshari2005/Sutra.git
+cd Sutra
+export AI_API_KEY="<your-api-key>"
+make setup
+make run
+```
+
+> **Evaluation Model Configuration:** `AI_API_KEY` is currently configured to target **`gemini/gemini-3.1-flash-lite`** (specified in [`harness/config.py`](harness/config.py) via `DEFAULT_AI_MODEL`). To evaluate with a different provider or model family, update `DEFAULT_AI_MODEL` in [`harness/config.py`](harness/config.py) in one line or export `AI_MODEL="<provider/model>"`.
+
+---
+
 **Status: Phase 0 + Phase 1 + Phase 2 + Phase 3 + Phase 4 complete, plus a real token-context fix validated against a live, unscripted failure — all numbers below are measured from fixtures committed in this repo right now, regenerated after that fix, not carried over from an earlier run.**
 
 ```

@@ -11,7 +11,7 @@ import pytest
 
 import run_demo  # noqa: E402
 
-ALL_KEYS = [env_var for env_var, _, _ in run_demo._LIVE_ADAPTER_CANDIDATES]
+ALL_KEYS = ["AI_API_KEY", "AI_MODEL", *[env_var for env_var, _, _ in run_demo._LIVE_ADAPTER_CANDIDATES]]
 
 
 @pytest.fixture(autouse=True)
@@ -42,8 +42,31 @@ def test_no_key_returns_none():
     assert run_demo._detect_live_adapter() is None
 
 
+def test_ai_api_key_beats_everything_else(monkeypatch):
+    monkeypatch.setenv("AI_API_KEY", "official-eval-key")
+    for var in run_demo._LIVE_ADAPTER_CANDIDATES:
+        monkeypatch.setenv(var[0], "dummy-value")
+    adapter = run_demo._detect_live_adapter()
+    assert adapter is not None
+    assert adapter.api_key_env == "AI_API_KEY"
+
+
+def test_ai_api_key_default_model(monkeypatch):
+    from harness.config import DEFAULT_AI_MODEL
+    monkeypatch.setenv("AI_API_KEY", "official-eval-key")
+    adapter = run_demo._detect_live_adapter()
+    assert adapter.model == DEFAULT_AI_MODEL
+
+
+def test_ai_api_key_runtime_override_via_ai_model(monkeypatch):
+    monkeypatch.setenv("AI_API_KEY", "official-eval-key")
+    monkeypatch.setenv("AI_MODEL", "openai/gpt-4o")
+    adapter = run_demo._detect_live_adapter()
+    assert adapter.model == "openai/gpt-4o"
+
+
 def test_priority_order_gemini_beats_everything_else(monkeypatch):
-    for var in ALL_KEYS:
+    for var in [k for k in ALL_KEYS if k not in ("AI_API_KEY", "AI_MODEL")]:
         monkeypatch.setenv(var, "dummy-value")
     adapter = run_demo._detect_live_adapter()
     assert adapter.api_key_env == "GEMINI_API_KEY"
@@ -77,3 +100,4 @@ def test_litellm_adapter_receives_custom_env_var_key_explicitly(monkeypatch):
     adapter = LiteLLMAdapter(model="dashscope/qwen-turbo", api_key_env="QWEN_API_KEY")
     assert adapter.api_key_env == "QWEN_API_KEY"
     assert os.environ.get(adapter.api_key_env) == "my-qwen-key-value"
+

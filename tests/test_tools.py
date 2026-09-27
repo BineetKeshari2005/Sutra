@@ -87,3 +87,18 @@ def test_git_checkpoint_commits_changes(tiny_repo):
 
     result2 = git_ops.git_checkpoint(tiny_repo, "no-op commit")
     assert result2["committed"] is False
+
+
+def test_open_file_and_edit_file_rejects_binary_file(tiny_repo):
+    binary_path = os.path.join(tiny_repo, "image.png")
+    with open(binary_path, "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00")
+
+    res_open = file_ops.open_file(tiny_repo, "image.png")
+    assert res_open["ok"] is False
+    assert "binary file detected" in res_open["error"]
+
+    res_edit = file_ops.edit_file(tiny_repo, "image.png", "PNG", "JPEG")
+    assert res_edit["ok"] is False
+    assert "binary file detected" in res_edit["error"]
+

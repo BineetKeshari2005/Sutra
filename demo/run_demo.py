@@ -461,7 +461,14 @@ def _detect_live_adapter() -> Any:
     a hard error in live/interactive mode, since those have no fixture
     script to fall back to). Always prints exactly one line naming what
     it picked."""
+    from harness.config import get_eval_model
     from harness.model_adapter.litellm_adapter import LiteLLMAdapter
+
+    # Official Hackathon Evaluation Credential (Highest Priority)
+    if os.environ.get("AI_API_KEY"):
+        eval_model, eval_label = get_eval_model()
+        print(f"Using {eval_label}")
+        return LiteLLMAdapter(model=eval_model, api_key_env="AI_API_KEY")
 
     for env_var, model, label in _LIVE_ADAPTER_CANDIDATES:
         if os.environ.get(env_var):
@@ -515,12 +522,14 @@ def live_repo_run(
     No cherry-pick: clones HEAD directly.
     Test gates are skipped (target_test=None) since we don't know the test runner.
     """
-    has_any_key = any(os.environ.get(env_var) for env_var, _, _ in _LIVE_ADAPTER_CANDIDATES)
+    has_any_key = bool(os.environ.get("AI_API_KEY")) or any(
+        os.environ.get(env_var) for env_var, _, _ in _LIVE_ADAPTER_CANDIDATES
+    )
     if not has_any_key:
         print(
-            "[live] ERROR: set one of "
+            "[live] ERROR: set AI_API_KEY (or one of "
             + ", ".join(env_var for env_var, _, _ in _LIVE_ADAPTER_CANDIDATES)
-            + " in .env"
+            + ") in environment or .env"
         )
         return 1
 
@@ -796,9 +805,11 @@ def _clone_and_run_interactive(
     (Part A's explicit requirement) no matter what this one needs to return
     or how its control flow evolves.
     """
-    has_any_key = any(os.environ.get(env_var) for env_var, _, _ in _LIVE_ADAPTER_CANDIDATES)
+    has_any_key = bool(os.environ.get("AI_API_KEY")) or any(
+        os.environ.get(env_var) for env_var, _, _ in _LIVE_ADAPTER_CANDIDATES
+    )
     if not has_any_key:
-        print("ERROR: set one of " + ", ".join(env_var for env_var, _, _ in _LIVE_ADAPTER_CANDIDATES) + " in .env")
+        print("ERROR: set AI_API_KEY (or one of " + ", ".join(env_var for env_var, _, _ in _LIVE_ADAPTER_CANDIDATES) + ") in environment or .env")
         return None, None, None
 
     print(f"Cloning {repo_url} ...")
