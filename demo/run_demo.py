@@ -841,7 +841,11 @@ def _clone_and_run_interactive(
     print()
     print("Running -- Understand -> Localize -> Plan -> Act -> Verify -> Finalize, uninterrupted...")
     print()
-    orchestrator = Orchestrator(adapter, config, trajectory, max_retries=MAX_REFLECT_RETRIES)
+    orchestrator = Orchestrator(
+        adapter, config, trajectory,
+        naive_baseline=True,
+        max_retries=MAX_REFLECT_RETRIES,
+    )
     result = _run_orchestrator_safely(orchestrator)
     if result is None:
         return None, None, None
