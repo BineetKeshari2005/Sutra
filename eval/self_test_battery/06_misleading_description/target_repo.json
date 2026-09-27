@@ -1,0 +1,12 @@
+{
+  "category": "06_misleading_description",
+  "name": "Misleading Description: Wrong File Named in Issue",
+  "repo_type": "git_local",
+  "repo_source": "scratch_repos/more-itertools",
+  "base_commit": "19ddb972845ab0e5b9b7449d3fd5930781407441",
+  "test_commit": "87d12578c3e558c57fbfbe663be63259c1fce56f",
+  "target_test": "tests/test_more.py::ConstrainedBatchesTests::test_nonpositive_max_count",
+  "regression_test_paths": ["tests/test_more.py::ConstrainedBatchesTests"],
+  "issue_id": "misleading-file-constrained-batches",
+  "expected_status": "verified"
+}

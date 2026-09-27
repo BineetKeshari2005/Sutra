@@ -40,7 +40,13 @@ def get_trajectory(run: str = DEFAULT_FIXTURE):
     safe_name = os.path.basename(run)  # no path traversal via the query param
     path = os.path.join(FIXTURES_DIR, f"{safe_name}.jsonl")
     if not os.path.isfile(path):
-        raise HTTPException(status_code=404, detail=f"no fixture named '{safe_name}'")
+        battery_path = os.path.join(
+            os.path.dirname(DEMO_DIR), "eval", "self_test_battery", "results", f"{safe_name}.jsonl"
+        )
+        if os.path.isfile(battery_path):
+            path = battery_path
+        else:
+            raise HTTPException(status_code=404, detail=f"no fixture or battery result named '{safe_name}'")
     return _read_jsonl(path)
 
 

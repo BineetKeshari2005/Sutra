@@ -1,0 +1,12 @@
+{
+  "category": "05_already_fixed",
+  "name": "Issue Already Fixed / Not Reproducible: Non-Bug Issue",
+  "repo_type": "git_local",
+  "repo_source": "scratch_repos/more-itertools",
+  "base_commit": "19ddb972845ab0e5b9b7449d3fd5930781407441",
+  "test_commit": null,
+  "target_test": "tests/test_more.py::CollateTests",
+  "regression_test_paths": ["tests/test_more.py::CollateTests"],
+  "issue_id": "collate-empty-iterables-already-works",
+  "expected_status": "already_clean_or_not_reproduced"
+}

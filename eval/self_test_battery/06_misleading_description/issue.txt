@@ -1,0 +1,7 @@
+Bug in more_itertools/recipes.py: constrained_batches() accepts nonpositive max_count
+
+In more_itertools/recipes.py, constrained_batches(iterable, max_size, max_count=...)
+validates that max_size > 0, but fails to check max_count.
+Please open more_itertools/recipes.py and add:
+if max_count is not None and max_count <= 0:
+    raise ValueError('maximum count must be greater than zero')

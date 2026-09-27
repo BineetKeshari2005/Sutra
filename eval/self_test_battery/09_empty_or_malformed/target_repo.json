@@ -1,0 +1,12 @@
+{
+  "category": "09_empty_or_malformed",
+  "name": "Empty or Malformed Issue: Low-Information Input",
+  "repo_type": "git_local",
+  "repo_source": "scratch_repos/more-itertools",
+  "base_commit": "19ddb972845ab0e5b9b7449d3fd5930781407441",
+  "test_commit": null,
+  "target_test": null,
+  "regression_test_paths": null,
+  "issue_id": "malformed-empty-issue",
+  "expected_status": "unresolved_or_graceful_exit"
+}

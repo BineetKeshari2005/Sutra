@@ -1,0 +1,9 @@
+slugify() does not collapse consecutive spaces into a single separator
+
+When calling `slugify("hello   world")`, the function currently returns
+"hello---world" because it replaces each individual whitespace character with the
+separator without collapsing them first. Consecutive whitespace characters should
+be collapsed so that only a single separator is inserted between words.
+
+Expected:
+`slugify("hello   world")` should return "hello-world".

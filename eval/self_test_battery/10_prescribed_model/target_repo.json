@@ -1,0 +1,12 @@
+{
+  "category": "10_prescribed_model",
+  "name": "Prescribed Model Verification: Live Adapter End-to-End",
+  "repo_type": "git_local",
+  "repo_source": "scratch_repos/more-itertools",
+  "base_commit": "19ddb972845ab0e5b9b7449d3fd5930781407441",
+  "test_commit": "87d12578c3e558c57fbfbe663be63259c1fce56f",
+  "target_test": "tests/test_more.py::ConstrainedBatchesTests::test_nonpositive_max_count",
+  "regression_test_paths": ["tests/test_more.py::ConstrainedBatchesTests"],
+  "issue_id": "prescribed-model-constrained-batches",
+  "expected_status": "verified"
+}

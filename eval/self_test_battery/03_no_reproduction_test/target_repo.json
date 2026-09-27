@@ -1,0 +1,12 @@
+{
+  "category": "03_no_reproduction_test",
+  "name": "No Reproduction Test Exists: Prose-Only Specification",
+  "repo_type": "git_local",
+  "repo_source": "scratch_repos/more-itertools",
+  "base_commit": "19ddb972845ab0e5b9b7449d3fd5930781407441",
+  "test_commit": null,
+  "target_test": null,
+  "regression_test_paths": ["tests/test_more.py::DistinctCombinationsTests"],
+  "issue_id": "distinct-combinations-negative-r",
+  "expected_status": "verified_without_target_gate"
+}

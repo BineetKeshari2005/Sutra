@@ -1,0 +1,13 @@
+{
+  "category": "04_too_hard_budget",
+  "name": "Genuinely Too Hard Within Budget: Abstention Path",
+  "repo_type": "git_local",
+  "repo_source": "scratch_repos/more-itertools",
+  "base_commit": "516f0a80fb7c2c8562dbb5e318fc2a3d44f4171f",
+  "test_commit": "0e6acdf9b60765ecf9634d6f5c132ac1bebc616b",
+  "target_test": "tests/test_more.py::ChunkedTests::test_negative",
+  "regression_test_paths": ["tests/test_more.py::ChunkedTests"],
+  "issue_id": "chunked-negative-n-budget-exhaustion",
+  "max_retries": 0,
+  "expected_status": "unresolved"
+}

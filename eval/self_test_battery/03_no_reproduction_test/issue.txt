@@ -1,0 +1,9 @@
+distinct_combinations() should return an empty iterator when r is negative
+
+When calling `distinct_combinations(iterable, r)` with a negative r (such as `r = -1`),
+it can fail unexpectedly during itertools combinations iteration. It should cleanly
+yield nothing (empty iterator) when r < 0, matching the behavior of standard
+itertools.combinations.
+
+Expected:
+If r < 0, return immediately without error.

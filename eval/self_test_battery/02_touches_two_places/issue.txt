@@ -1,0 +1,21 @@
+one()/only() silently swallow a falsy custom exception
+
+`one(iterable, too_long=exc)` (and the equivalent `too_short`, and `only`'s
+`too_long`) are documented to raise the caller-supplied exception when the
+iterable has too many/too few items. Internally this is implemented as:
+
+    raise too_long or ValueError(msg)
+
+If a caller passes an exception *instance* whose class overrides __bool__ to
+return False (a legitimate, if unusual, pattern for "empty" sentinel
+exceptions), `too_long or ValueError(msg)` evaluates the falsy `too_long` as
+False and raises the generic ValueError instead of the caller's exception.
+
+Separately, `msg` is built eagerly on every too-many-items path, which calls
+repr() on the first two items even when a custom too_long is going to be
+raised anyway -- if an item's __repr__ raises, that exception shadows the
+real one.
+
+Expected: the caller's too_long/too_short is always raised when given,
+regardless of its truthiness, and the default message is only constructed
+when no custom exception was supplied.

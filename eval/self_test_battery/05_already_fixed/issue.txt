@@ -1,0 +1,5 @@
+[BUG] collate() raises TypeError on empty input iterables
+
+When collate() is called with multiple empty iterables, e.g.
+collate([], []), it supposedly crashes with TypeError: cannot merge empty streams.
+Please modify collate() in more_itertools/more.py to handle empty lists.

@@ -1,0 +1,22 @@
+[BUG]: Search query is lost when navigating back from a movie details page
+
+Bug Description
+
+Summary
+When a user searches for a movie and opens a movie details page, navigating back clears the search query and results. Users have to type their search again, which creates a poor user experience.
+
+Current Behavior
+1. User searches for a movie.
+2. Search results are displayed.
+3. User opens a movie from the search results.
+4. Clicking the browser's Back button or the app's back navigation returns to the search page with the search input cleared and no results shown.
+
+Possible Solution
+- Persist the search state using URL query parameters (e.g. /search?q=inception).
+- Alternatively, store the search state in global state (Zustand/Context) or browser session storage.
+- Restore the previous search results and scroll position when returning to the Search page.
+
+Acceptance Criteria
+- Search query is preserved after navigating back.
+- Search results are restored without requiring a new search.
+- Applied filters remain intact.

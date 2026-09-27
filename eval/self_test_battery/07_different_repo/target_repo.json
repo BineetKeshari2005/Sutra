@@ -1,0 +1,12 @@
+{
+  "category": "07_different_repo",
+  "name": "Different Repo Entirely: strutils slugify whitespace collapsing",
+  "repo_type": "git_local",
+  "repo_source": "eval/self_test_battery/repos/strutils",
+  "base_commit": "08430eab7fea42fe45457081ad37721d6924323a",
+  "test_commit": null,
+  "target_test": "tests/test_slug.py::test_consecutive_spaces_collapsed",
+  "regression_test_paths": ["tests/test_slug.py"],
+  "issue_id": "strutils-consecutive-spaces-slugify",
+  "expected_status": "verified"
+}

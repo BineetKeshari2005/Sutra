@@ -1,0 +1,12 @@
+{
+  "category": "08_larger_real_world_file",
+  "name": "Larger Real-World File: Cineverse Issue 7 (Search State Persistence)",
+  "repo_type": "git_remote",
+  "repo_source": "https://github.com/shouryapratap132006/cineverse",
+  "base_commit": "HEAD",
+  "test_commit": null,
+  "target_test": null,
+  "regression_test_paths": null,
+  "issue_id": "cineverse-issue-7-search-state",
+  "expected_status": "verified_or_clean_patch"
+}

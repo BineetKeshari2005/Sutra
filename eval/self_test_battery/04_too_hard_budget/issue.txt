@@ -1,0 +1,13 @@
+chunked() leaks an internal islice error message for negative n
+
+`chunked(iterable, n)` validates that *n* is positive:
+
+    if n < 1:
+        raise ValueError('n must be at least 1')
+
+When passed a negative *n*, it raises ValueError('n must be at least 1'), but
+when passed `strict=True` or an iterator without known length under complex slicing,
+an internal itertools.islice ValueError ('indices must be >= 0') escapes unhandled.
+
+Expected: chunked() must reject all n < 0 with ValueError('n must be at least 0')
+consistently, matching the convention of sliced() and tail().

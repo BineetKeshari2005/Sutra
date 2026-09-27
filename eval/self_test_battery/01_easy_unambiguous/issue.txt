@@ -1,0 +1,16 @@
+constrained_batches() accepts a nonpositive max_count without complaint
+
+`constrained_batches(iterable, max_size, max_count=...)` validates that
+*max_size* is positive:
+
+    if max_size <= 0:
+        raise ValueError('maximum size must be greater than zero')
+
+but performs no equivalent check on *max_count*. Passing `max_count=0` or a
+negative value silently produces batches with a bogus `batch_count == max_count`
+comparison (0 == 0 is always true, so every batch is flushed after a single
+item) instead of raising a clear error the way max_size already does.
+
+Expected: max_count, like max_size, should raise ValueError('maximum count
+must be greater than zero') for any max_count <= 0, right after the existing
+max_size check.

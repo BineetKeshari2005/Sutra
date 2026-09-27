@@ -1,0 +1,12 @@
+{
+  "category": "02_touches_two_places",
+  "name": "Looks Simple But Touches Two Places: one() and only()",
+  "repo_type": "git_local",
+  "repo_source": "scratch_repos/more-itertools",
+  "base_commit": "19ddb972845ab0e5b9b7449d3fd5930781407441",
+  "test_commit": "def2dabea858b6ecb84ee0c52e6e07929f2c409c",
+  "target_test": "tests/test_more.py::OneTests::test_falsy_custom_exception",
+  "regression_test_paths": ["tests/test_more.py::OneTests", "tests/test_more.py::OnlyTests"],
+  "issue_id": "one-only-falsy-exception",
+  "expected_status": "verified"
+}
